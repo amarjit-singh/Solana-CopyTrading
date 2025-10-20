@@ -1,0 +1,202 @@
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║                    🔧 GRPC TOKEN SETUP - VISUAL GUIDE                     ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  ❌ CURRENT PROBLEM                                                       │
+│  ━━━━━━━━━━━━━━━━━━━                                                      │
+│                                                                           │
+│  Your .env file:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │ GRPCTOKEN=os9VAOW1Vj4KOvex                                      │     │
+│  │ GRPC_ENDPOINT=https://grpc.ny.shyft.to/                         │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                            ↓                                              │
+│                            ❌ NOT WORKING                                 │
+│                            Token is RPC-only                              │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  ✅ SOLUTION: HELIUS (FREE)                                               │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━                                              │
+│                                                                           │
+│  STEP 1: Sign Up (2 min) 🌐                                              │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  Open Browser:                                                  │     │
+│  │  https://helius.dev/                                            │     │
+│  │                                                                 │     │
+│  │  Click "Get Started" or "Sign Up"                              │     │
+│  │  • Enter email                                                  │     │
+│  │  • Create password                                              │     │
+│  │  • Verify email                                                 │     │
+│  │  ✅ Account created (FREE, no credit card)                      │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+│  STEP 2: Get API Key (1 min) 🔑                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  Go to Dashboard:                                               │     │
+│  │  https://dashboard.helius.dev/                                  │     │
+│  │                                                                 │     │
+│  │  Click "Create New API Key"                                     │     │
+│  │  • Name: "Copy Trading Bot" (or any name)                      │     │
+│  │  • Network: Mainnet                                             │     │
+│  │  • Click Create                                                 │     │
+│  │                                                                 │     │
+│  │  📋 Copy your API key:                                          │     │
+│  │  a1b2c3d4-e5f6-7890-abcd-ef1234567890                          │     │
+│  │         ↑                                                       │     │
+│  │    Save this!                                                   │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+│  STEP 3A: Interactive Setup (EASIEST) 🚀                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  $ node switch_to_helius.js                                     │     │
+│  │                                                                 │     │
+│  │  Choose option [1] Helius                                       │     │
+│  │  Paste your API key when prompted                               │     │
+│  │  ✅ Done! .env updated automatically                            │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+│  STEP 3B: Manual Setup (Alternative) ✏️                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  $ nano .env                                                    │     │
+│  │                                                                 │     │
+│  │  Change these lines:                                            │     │
+│  │  ┌───────────────────────────────────────────────────────┐     │     │
+│  │  │ # OLD:                                                │     │     │
+│  │  │ GRPCTOKEN=os9VAOW1Vj4KOvex                           │     │     │
+│  │  │ GRPC_ENDPOINT=https://grpc.ny.shyft.to/              │     │     │
+│  │  │                                                       │     │     │
+│  │  │ # NEW (paste your Helius key):                       │     │     │
+│  │  │ GRPCTOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890       │     │     │
+│  │  │ GRPC_ENDPOINT=https://mainnet.helius-rpc.com         │     │     │
+│  │  └───────────────────────────────────────────────────────┘     │     │
+│  │                                                                 │     │
+│  │  Save: Ctrl+X → Y → Enter                                      │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+│  STEP 4: Test Connection (30 sec) 🧪                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  $ node test_grpc_token.js                                      │     │
+│  │                                                                 │     │
+│  │  Expected output:                                               │     │
+│  │  ✅ Subscription created successfully!                          │     │
+│  │  🎉 Your gRPC token is VALID and working!                       │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+│  STEP 5: Start Bot (30 sec) 🤖                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │  $ npm start                                                    │     │
+│  │                                                                 │     │
+│  │  Expected output:                                               │     │
+│  │  ✅ All monitors started successfully                           │     │
+│  │  [Monitor 2S3BCxBE...] Ping interval started                    │     │
+│  │  🎉 Bot is running!                                             │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  ⚡ QUICK COMMANDS REFERENCE                                              │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━━                                              │
+│                                                                           │
+│  node switch_to_helius.js    # Interactive setup (easiest)               │
+│  node test_grpc_token.js      # Test your token                          │
+│  npm start                    # Start the bot                            │
+│  nano .env                    # Edit config manually                     │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  📚 HELP FILES CREATED                                                    │
+│  ━━━━━━━━━━━━━━━━━━━━━━                                                  │
+│                                                                           │
+│  1. QUICK_FIX_GRPC.md              → 5 min quick start                   │
+│  2. COMPLETE_GRPC_SETUP_GUIDE.md   → Full detailed guide                 │
+│  3. HOW_TO_GET_GRPC_TOKEN.md       → All provider options                │
+│  4. THIS_VISUAL_GUIDE.txt          → This visual guide                   │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  🎯 COMPARISON: PROVIDERS                                                 │
+│  ━━━━━━━━━━━━━━━━━━━━━━━━━                                               │
+│                                                                           │
+│  ╔══════════╦═════════╦═══════════╦══════════╦═══════════════╗           │
+│  ║ Provider ║ Free?   ║ gRPC Cost ║ Setup    ║ Best For      ║           │
+│  ╠══════════╬═════════╬═══════════╬══════════╬═══════════════╣           │
+│  ║ Helius   ║ ✅ Yes  ║ FREE      ║ 3 min    ║ Everyone ⭐   ║           │
+│  ║ Shyft    ║ ❌ No   ║ ~$100/mo  ║ 10 min   ║ Paid users    ║           │
+│  ║ Triton   ║ ❌ No   ║ ~$50/mo   ║ 10 min   ║ Pro traders   ║           │
+│  ╚══════════╩═════════╩═══════════╩══════════╩═══════════════╝           │
+│                                                                           │
+│  🏆 WINNER: Helius (best for 99% of users)                               │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  ❓ TROUBLESHOOTING                                                       │
+│  ━━━━━━━━━━━━━━━━━                                                        │
+│                                                                           │
+│  Problem: "token not found" after setup                                  │
+│  Solution:                                                                │
+│    1. Check .env has no quotes: GRPCTOKEN=abc123 (not "abc123")         │
+│    2. Check no spaces: GRPCTOKEN=abc123 (not GRPCTOKEN= abc123)         │
+│    3. Verify token is copied correctly (no extra characters)             │
+│    4. Try regenerating token in Helius dashboard                         │
+│                                                                           │
+│  Problem: Test script fails                                              │
+│  Solution:                                                                │
+│    1. Verify you're logged into Helius                                   │
+│    2. Check API key is for "Mainnet" (not Devnet)                       │
+│    3. Ensure account is active                                           │
+│                                                                           │
+│  Problem: Bot still shows errors                                         │
+│  Solution:                                                                │
+│    1. Restart bot: npm start                                             │
+│    2. Check both GRPCTOKEN and GRPC_ENDPOINT are updated                 │
+│    3. Verify .env file was saved                                         │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│  ✅ SUCCESS CHECKLIST                                                     │
+│  ━━━━━━━━━━━━━━━━━━━                                                      │
+│                                                                           │
+│  After setup, you should have:                                           │
+│                                                                           │
+│  ☐ Created Helius account                                                │
+│  ☐ Obtained API key                                                      │
+│  ☐ Updated .env file                                                     │
+│  ☐ Tested token (node test_grpc_token.js) ✅                             │
+│  ☐ Bot starts without errors (npm start) ✅                              │
+│  ☐ Seeing "All monitors started successfully" ✅                         │
+│                                                                           │
+│  If all checked ✅, you're done! 🎉                                       │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║  🚀 READY TO START?                                                       ║
+║                                                                           ║
+║  Run: node switch_to_helius.js                                           ║
+║                                                                           ║
+║  Total time: 5 minutes                                                   ║
+║  Cost: FREE                                                               ║
+║  Difficulty: Easy                                                         ║
+║                                                                           ║
+║  🎉 You'll be trading in minutes!                                         ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝

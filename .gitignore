@@ -1,0 +1,10 @@
+.env
+node_modules
+logs
+portfolio.json
+wallets
+pnl_csvs
+data
+csvfile
+ata_cache.json
+yarn.lock
