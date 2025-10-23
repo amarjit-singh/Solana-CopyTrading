@@ -998,8 +998,8 @@ class TransactionMonitor extends EventEmitter {
           console.log(chalk.bgGreen.black(`[${utcNow()}] 🎯 TARGET WALLET BUY DETECTED: ${shortTokenName} | User: ${user.slice(0, 8)}... | Amount: ${(Math.abs(solChanges) / 10**9).toFixed(6)} SOL | Txid: ${signature?.slice(0, 8)}...`));
           console.log(chalk.bgYellow.black(`[${utcNow()}] ⏳ Waiting for target transaction to complete before copying...`));
           
-          // Wait a bit to ensure target transaction is confirmed
-          await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+          // // Wait a bit to ensure target transaction is confirmed
+          // await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
           
           console.log(chalk.bgCyan.black(`[${utcNow()}] 🚀 Starting copy trade for ${shortTokenName}...`));
           
@@ -1066,8 +1066,8 @@ class TransactionMonitor extends EventEmitter {
           console.log(chalk.bgGreen.black(`[${utcNow()}] 🎯 TARGET WALLET SELL DETECTED: ${shortTokenName} | User: ${user.slice(0, 8)}... | Amount: ${(Math.abs(solChanges) / 10**9).toFixed(6)} SOL | Txid: ${signature?.slice(0, 8)}...`));
           console.log(chalk.bgYellow.black(`[${utcNow()}] ⏳ Waiting for target transaction to complete before copying...`));
           
-          // Wait a bit to ensure target transaction is confirmed
-          await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+          // // Wait a bit to ensure target transaction is confirmed
+          // await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
           
           console.log(chalk.bgCyan.black(`[${utcNow()}] 🚀 Starting copy sell for ${shortTokenName}...`));
           
