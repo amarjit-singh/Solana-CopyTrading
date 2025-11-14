@@ -29,8 +29,26 @@ let botState = {
   messageHistory: {} // Track message history per chat: { chatId: [messageIds] }
 };
 
-// Initialize bot
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+// Check for required environment variables and initialize bot
+let bot;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.log(chalk.yellow(`[${utcNow()}] ⚠️ Telegram bot disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables not set`));
+  // Create a dummy bot object that won't throw errors but won't do anything
+  bot = {
+    onText: () => {},
+    on: () => {},
+    sendMessage: async () => {},
+    deleteMessage: async () => {},
+    editMessageText: async () => {},
+    answerCallbackQuery: async () => {}
+  };
+} else {
+  // Initialize bot with polling
+  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+}
 
 // Command list
 const COMMANDS = {
