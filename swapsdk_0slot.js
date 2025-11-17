@@ -686,14 +686,18 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 })
       );
       // Add token close instruction if this is a full sell
-      if (isFull) {
+      // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
+      // that may leave dust amounts preventing clean close
+      if (isFull && !isT2022) {
 
         try {
           // console.log(chalk.cyan(`🔒 Adding token close instruction for full sell: ${mint}`));
           const closeInstruction = createCloseAccountInstruction(
             userAta, // token account to close
             wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey // authority
+            wallet.keypair.publicKey, // authority
+            [], // multiSigners
+            tokenProgramId // CRITICAL: Use correct token program for Token2022
           );
           instructions.push(closeInstruction);
         } catch (error) {
@@ -995,6 +999,9 @@ export async function sell_pumpswap(baseMint, token_amount, context, isFull) {
       // Calculate user token accounts dynamically
       const walletPublicKey = wallet.keypair.publicKey.toString();
 
+      // CRITICAL: Detect token type for proper close instruction
+      const isT2022Base = await isToken2022(solanaConnection, baseMint);
+      const tokenProgramIdBase = isT2022Base ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
 
       // Check if user has an Associated Token Account for base mint using cache
       const baseMintPubkey = new PublicKey(baseMint);
@@ -1029,12 +1036,13 @@ export async function sell_pumpswap(baseMint, token_amount, context, isFull) {
           minQuoteAmountOut
         );
         instructions.push(sellInstruction);
-     
+
 
 
 
       // Add token close instruction if this is a full sell
-      if (isFull && !DIRECT_ADDED_PUMPSWAP) {
+      // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
+      if (isFull && !DIRECT_ADDED_PUMPSWAP && !isT2022Base) {
         try {
           const walletPublicKey = wallet.keypair.publicKey.toString();
           const userAta = await getAtaAddress(baseMint, walletPublicKey);
@@ -1042,7 +1050,9 @@ export async function sell_pumpswap(baseMint, token_amount, context, isFull) {
           const closeInstruction = createCloseAccountInstruction(
             userAta, // token account to close
             wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey // authority
+            wallet.keypair.publicKey, // authority
+            [], // multiSigners
+            tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
           );
           instructions.push(closeInstruction);
 
@@ -1313,6 +1323,9 @@ export async function sell_pumpswap_direct(baseMint, token_amount, context, isFu
       // Calculate user token accounts dynamically
       const walletPublicKey = wallet.keypair.publicKey.toString();
 
+      // CRITICAL: Detect token type for proper close instruction
+      const isT2022Base = await isToken2022(solanaConnection, baseMint);
+      const tokenProgramIdBase = isT2022Base ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
 
       // Check if user has an Associated Token Account for base mint using cache
       const baseMintPubkey = new PublicKey(baseMint);
@@ -1348,12 +1361,13 @@ export async function sell_pumpswap_direct(baseMint, token_amount, context, isFu
       maxQuoteAmountIn
     );
     instructions.push(buyInstruction);
-     
+
 
 
 
       // Add token close instruction if this is a full sell
-      if (isFull && !DIRECT_ADDED_PUMPSWAP) {
+      // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
+      if (isFull && !DIRECT_ADDED_PUMPSWAP && !isT2022Base) {
         try {
           const walletPublicKey = wallet.keypair.publicKey.toString();
           const userAta = await getAtaAddress(baseMint, walletPublicKey);
@@ -1361,7 +1375,9 @@ export async function sell_pumpswap_direct(baseMint, token_amount, context, isFu
           const closeInstruction = createCloseAccountInstruction(
             userAta, // token account to close
             wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey // authority
+            wallet.keypair.publicKey, // authority
+            [], // multiSigners
+            tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
           );
           instructions.push(closeInstruction);
 

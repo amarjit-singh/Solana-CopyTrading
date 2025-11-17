@@ -126,14 +126,23 @@ function scheduleTokenTypeBackgroundSave() {
 async function loadAtaCache(connection = null) {
   if (!cacheLoaded) {
     loadAtaCacheSync(); // Immediate sync load first
-    
+
     // Background validation if connection provided
     if (connection) {
       setImmediate(async () => {
         const invalidEntries = [];
         for (const [key, ataAddress] of ataCache.entries()) {
+          // Skip token type entries (they're not ATAs)
+          if (key.startsWith('token_type_')) continue;
+
           try {
-            await getAccount(connection, new PublicKey(ataAddress));
+            // Determine token program from cache key format
+            let tokenProgramId = TOKEN_PROGRAM_ID;
+            if (key.endsWith('_token2022')) {
+              tokenProgramId = TOKEN_2022_PROGRAM_ID;
+            }
+
+            await getAccount(connection, new PublicKey(ataAddress), 'confirmed', tokenProgramId);
           } catch (e) {
             if (e.message && e.message.includes("Failed to find account")) {
               invalidEntries.push(key);
@@ -316,7 +325,8 @@ async function getAtaAddress(mint, walletPublicKey, connection = null) {
     // Only validate on-chain if connection provided and we need to be sure
     if (connection) {
       try {
-        await getAccount(connection, cachedAtaPublicKey);
+        // CRITICAL: Pass tokenProgramId to avoid TokenInvalidAccountOwnerError for Token2022
+        await getAccount(connection, cachedAtaPublicKey, 'confirmed', tokenProgramId);
         return cachedAtaPublicKey;
       } catch (e) {
         if (e.message && e.message.includes("Failed to find account")) {
@@ -343,7 +353,8 @@ async function getAtaAddress(mint, walletPublicKey, connection = null) {
       // Validate and migrate to new key format
       if (connection) {
         try {
-          await getAccount(connection, cachedAtaPublicKey);
+          // CRITICAL: Pass tokenProgramId to avoid TokenInvalidAccountOwnerError
+          await getAccount(connection, cachedAtaPublicKey, 'confirmed', tokenProgramId);
           // Migrate to new key format
           ataCache.delete(oldKey);
           addAtaToCache(mint, walletPublicKey, cachedAta, connection, tokenType);
@@ -431,9 +442,13 @@ function getAtaCacheStats(connection = null) {
  * @returns {Promise<boolean>} - True if exists, false otherwise
  */
 async function ataExistsOnChain(connection, mint, walletPublicKey) {
-  const ataAddress = await getAtaAddress(mint, walletPublicKey);
+  // Detect token type to use correct program ID
+  const isT2022 = await isToken2022(connection, mint);
+  const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+
+  const ataAddress = await getAtaAddress(mint, walletPublicKey, connection);
   try {
-    await getAccount(connection, ataAddress);
+    await getAccount(connection, ataAddress, 'confirmed', tokenProgramId);
     return true;
   } catch (e) {
     if (e.message && e.message.includes("Failed to find account")) {

@@ -8,6 +8,7 @@ dotenv.config();
 import { buy_pumpfun, sell_pumpfun} from "./swapsdk_0slot.js";
 import { swap } from "./swap.js";
 import globalBlockhashManager from "./global_blockhash_manager.js";
+import { isToken2022, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "./ata_cache.js";
 
 const RPC_URL = process.env.RPC_URL;
 const connection = new Connection(RPC_URL, "confirmed");
@@ -357,17 +358,28 @@ export const getSplTokenBalance = async (mint) => {
     throw err;
   }
 
+  // CRITICAL: Detect token type to use correct program ID
+  const isT2022 = await isToken2022(connection, mint);
+  const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+
   // const publicKey = getPublicKeyFromPrivateKey();
   const publicKey = process.env.PUB_KEY;
-  const ata = await getAssociatedTokenAddress(mintPubkey, new PublicKey(publicKey));
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    new PublicKey(publicKey),
+    false, // allowOwnerOffCurve
+    tokenProgramId // CRITICAL: Use correct token program
+  );
 
   let account;
   try {
-    account = await getAccount(connection, ata);
+    // CRITICAL: Pass tokenProgramId to avoid TokenInvalidAccountOwnerError
+    account = await getAccount(connection, ata, 'confirmed', tokenProgramId);
   } catch (err) {
     // Handle TokenAccountNotFoundError gracefully
     if (
       err.name === "TokenAccountNotFoundError" ||
+      err.name === "TokenInvalidAccountOwnerError" ||
       (err.message && (
         err.message.includes("Failed to find account") ||
         err.message.includes("Account does not exist") ||
