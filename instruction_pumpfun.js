@@ -2,7 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
 // import { transactionFromInstructions } from "@pump-fun/pump-swap-sdk";
 import dotenv from "dotenv";
-import { getAssociatedTokenAddress } from "@solana/spl-token";
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 
 dotenv.config();
 // PRI
@@ -13,7 +13,7 @@ const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"; // or th
 const solanaConnection = new Connection(process.env.RPC_URL || "https://api.mainnet-beta.solana.com", COMMITMENT_LEVEL);
 
   // Function to create PumpFun buy instruction with exact structure based on IDL
-  export async function createPumpFunBuyInstruction(mint, solAmount, tokenAmount, user, creator, feeRecipient, userAta) {
+  export async function createPumpFunBuyInstruction(mint, solAmount, tokenAmount, user, creator, feeRecipient, userAta, tokenProgramId = TOKEN_PROGRAM_ID) {
 
     // Convert amounts to proper format
     const solAmountBN = new BN(solAmount);
@@ -38,11 +38,10 @@ const solanaConnection = new Connection(process.env.RPC_URL || "https://api.main
     // Derive bonding curve PDA: seeds = ["bonding-curve", mint]
     const [bondingCurvePda] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintPubkey.toBuffer()], PUMP_FUN_PROGRAM);
   
-    // Derive associated bonding curve PDA: seeds = [bonding_curve, specific_seed, mint]
-    const associatedBondingCurveSeed = Buffer.from([
-      6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237, 95, 91, 55, 145, 58, 140, 245, 133, 126,
-      255, 0, 169,
-    ]);
+    // Derive associated bonding curve PDA: seeds = [bonding_curve, token_program_id, mint]
+    // CRITICAL: Use the correct token program ID bytes for the seed
+    // For Token2022, this must be TOKEN_2022_PROGRAM_ID, not TOKEN_PROGRAM_ID
+    const associatedBondingCurveSeed = Buffer.from(tokenProgramId.toBytes());
     const associatedBondingCurveProgramId = new PublicKey(Uint8Array.from([
       140, 151, 37, 143, 78, 36, 137, 241, 187, 61, 16, 41, 20, 142, 13, 131, 11, 90, 19, 153, 218, 255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89
     ]));
@@ -121,7 +120,7 @@ const solanaConnection = new Connection(process.env.RPC_URL || "https://api.main
           isWritable: false,
         },
         {
-          pubkey: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), // token_program
+          pubkey: tokenProgramId, // token_program (Token or Token2022)
           isSigner: false,
           isWritable: false,
         },
@@ -194,7 +193,7 @@ const solanaConnection = new Connection(process.env.RPC_URL || "https://api.main
   }
   
   // Function to create PumpFun sell instruction with exact structure based on IDL
-  export async function createPumpFunSellInstruction(mint, solAmount, tokenAmount, user, creator, feeRecipient, userAta) {
+  export async function createPumpFunSellInstruction(mint, solAmount, tokenAmount, user, creator, feeRecipient, userAta, tokenProgramId = TOKEN_PROGRAM_ID) {
     // Convert amounts to proper format
     const solAmountBN = new BN(solAmount);
     const tokenAmountBN = new BN(tokenAmount);
@@ -212,11 +211,10 @@ const solanaConnection = new Connection(process.env.RPC_URL || "https://api.main
     // Derive bonding curve PDA: seeds = ["bonding-curve", mint]
     const [bondingCurvePda] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintPubkey.toBuffer()], PUMP_FUN_PROGRAM);
   
-    // Derive associated bonding curve PDA: seeds = [bonding_curve, specific_seed, mint]
-    const associatedBondingCurveSeed = Buffer.from([
-      6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237, 95, 91, 55, 145, 58, 140, 245, 133, 126,
-      255, 0, 169,
-    ]);
+    // Derive associated bonding curve PDA: seeds = [bonding_curve, token_program_id, mint]
+    // CRITICAL: Use the correct token program ID bytes for the seed
+    // For Token2022, this must be TOKEN_2022_PROGRAM_ID, not TOKEN_PROGRAM_ID
+    const associatedBondingCurveSeed = Buffer.from(tokenProgramId.toBytes());
     const associatedBondingCurveProgramId = new PublicKey(Uint8Array.from([
       140, 151, 37, 143, 78, 36, 137, 241, 187, 61, 16, 41, 20, 142, 13, 131, 11, 90, 19, 153, 218, 255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89
     ]));
@@ -305,7 +303,7 @@ const solanaConnection = new Connection(process.env.RPC_URL || "https://api.main
           isWritable: true,
         },
         {
-          pubkey: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), // token_program
+          pubkey: tokenProgramId, // token_program (Token or Token2022)
           isSigner: false,
           isWritable: false,
         },

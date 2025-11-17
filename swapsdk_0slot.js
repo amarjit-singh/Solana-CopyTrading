@@ -16,7 +16,7 @@ import {
 import chalk from "chalk";
 import { createPumpFunBuyInstruction, createPumpFunSellInstruction } from "./instruction_pumpfun.js";
 import { createPumpSwapBuyInstruction, createPumpSwapSellInstruction } from "./instruction_pumpswap.js";
-import { hasAtaInCache, hasAtaInCacheSync, addAtaToCache, removeAtaFromCache, getAtaAddress, getAtaAddressSync } from "./ata_cache.js";
+import { hasAtaInCache, hasAtaInCacheSync, addAtaToCache, removeAtaFromCache, getAtaAddress, getAtaAddressSync, isToken2022, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./ata_cache.js";
 import { BlockhashManager } from "./blockhash_manager.js";
 dotenv.config();
 // PRI
@@ -421,33 +421,67 @@ export async function buy_pumpfun(mint, amount, context) {
     const feeRecipient = context.feeRecipient;
     const walletPublicKey = wallet.keypair.publicKey;
     const instructions = [];
-    
-    // Ultra-fast ATA handling using sync cache functions
-    const ataExistsInCache = hasAtaInCacheSync(mint, walletPublicKey.toString());
+
+    // CRITICAL: Detect token type FIRST before any cache operations
+    const isT2022 = await isToken2022(solanaConnection, mint);
+    const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+    const tokenType = isT2022 ? 'token2022' : 'token';
+
+    console.log(`🔍 Token Type Detection: ${mint}`);
+    console.log(`   Is Token2022: ${isT2022}`);
+    console.log(`   Token Program: ${tokenProgramId.toString()}`);
+    console.log(`   Token Type: ${tokenType}`);
+
+    // Ultra-fast ATA handling using sync cache functions with token type
+    const ataExistsInCache = hasAtaInCacheSync(mint, walletPublicKey.toString(), tokenType);
+    console.log(`   ATA in cache (${tokenType}): ${ataExistsInCache}`);
+
     let userAta;
-    
+    let ataExistsOnChain = false;
+
     if (ataExistsInCache) {
       // ATA exists in cache, get it from cache synchronously
-      userAta = getAtaAddressSync(mint, walletPublicKey.toString());
+      userAta = getAtaAddressSync(mint, walletPublicKey.toString(), tokenType);
+      console.log(`   📋 Cached ATA: ${userAta?.toString()}`);
+
       if (!userAta) {
         // Fallback to async if sync fails
-        userAta = await getAtaAddress(mint, walletPublicKey.toString());
+        userAta = await getAtaAddress(mint, walletPublicKey.toString(), solanaConnection);
+        console.log(`   ⚠️ Sync failed, async ATA: ${userAta.toString()}`);
+      }
+
+      // CRITICAL: Validate cached ATA exists on-chain (especially for Token2022)
+      try {
+        await getAccount(solanaConnection, userAta, 'confirmed', tokenProgramId);
+        ataExistsOnChain = true;
+        console.log(`   ✅ Validated: ATA exists on-chain`);
+      } catch (e) {
+        ataExistsOnChain = false;
+        console.log(`   ⚠️ Cached ATA does NOT exist on-chain - will create it`);
+        // Remove from cache since it doesn't exist
+        removeAtaFromCache(mint, walletPublicKey.toString(), solanaConnection, tokenType);
       }
     } else {
       // ATA doesn't exist in cache, calculate it and add to cache
-      userAta = await getAtaAddress(mint, walletPublicKey.toString());
-      
-      // Create ATA instruction since it's not in cache (likely doesn't exist on-chain)
+      userAta = await getAtaAddress(mint, walletPublicKey.toString(), solanaConnection);
+      console.log(`   📝 Calculated new ATA: ${userAta.toString()}`);
+    }
+
+    // Add ATA creation instruction if it doesn't exist on-chain
+    if (!ataExistsOnChain) {
+      console.log(`   ➕ Adding ATA creation instruction with ${tokenProgramId.toString()}`);
       instructions.push(
         createAssociatedTokenAccountInstruction(
           walletPublicKey,
           userAta,
           walletPublicKey,
-          new PublicKey(mint)
+          new PublicKey(mint),
+          tokenProgramId
         )
       );
-    } 
-   
+      console.log(`   ✅ ATA instruction added (total instructions: ${instructions.length})`);
+    }
+
     // Create buy instruction with pre-computed values
     const buyInstruction = await createPumpFunBuyInstruction(
       mint,
@@ -456,7 +490,8 @@ export async function buy_pumpfun(mint, amount, context) {
       walletPublicKey,
       coin_creator,
       feeRecipient,
-      userAta
+      userAta,
+      tokenProgramId
     );
     
     // Get blockhash synchronously first, fallback to async only if needed
@@ -479,11 +514,16 @@ export async function buy_pumpfun(mint, amount, context) {
         toPubkey: SLOT_TIP_ACCOUNT,
         lamports: SLOT_TIP_LAMPORTS,
       });
-      
+
       // Build transaction in one pass
       const allInstructions = [slotTipIx, prioritizationIx, unitLimitIx, buyInstruction];
       if (instructions.length > 0) allInstructions.unshift(...instructions);
-      
+
+      console.log(`📦 Final transaction composition:`);
+      console.log(`   Pre-instructions (ATA, etc): ${instructions.length}`);
+      console.log(`   Total instructions in TX: ${allInstructions.length}`);
+      console.log(`   Instruction order: ${instructions.length > 0 ? '[ATA], ' : ''}[Tip], [Priority], [UnitLimit], [Buy]`);
+
       const txMessage = new TransactionMessage({
         payerKey: walletPublicKey,
         recentBlockhash,
@@ -609,9 +649,14 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
       } catch (sdkErr) {
         throw new Error("Failed to get creator/feeRecipient from context or SDK: " + sdkErr.message);
       }
+
+      // CRITICAL: Detect token type FIRST
+      const isT2022 = await isToken2022(solanaConnection, mint);
+      const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+
       const walletPublicKey = wallet.keypair.publicKey.toString();
-      const userAta = await getAtaAddress(mint, walletPublicKey);
-      
+      const userAta = await getAtaAddress(mint, walletPublicKey, solanaConnection);
+
 
       // const blockhashStartTime = Date.now();
       let recentBlockhash = blockhashManager.getBlockhashSync();
@@ -623,6 +668,7 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
       }
 
       const instructions = [];
+
       const sellInstruction = await createPumpFunSellInstruction(
         mint,
         0,
@@ -630,7 +676,8 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
         wallet.keypair.publicKey,
         coin_creator,
         feeRecipient,
-        userAta
+        userAta,
+        tokenProgramId
       );
       instructions.push(sellInstruction);
 
@@ -702,7 +749,7 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
         throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
       if (txid && isFull) {
-        // Remove ATA from cache since we're closing the account
+        // Remove ATA from cache since we're closing the account (remove both types)
         removeAtaFromCache(mint, walletPublicKey);
       }
 
@@ -786,39 +833,52 @@ export async function buy_pumpswap(mint, amount, context) {
     console.log("basemint:", baseMintPubkey)
     console.log("quotemint:", quoteMintPubkey)
 
+    // CRITICAL: Detect token types FIRST
+    const isT2022Base = await isToken2022(solanaConnection, baseMint);
+    const tokenProgramIdBase = isT2022Base ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+    const tokenTypeBase = isT2022Base ? 'token2022' : 'token';
+
+    const isT2022Quote = await isToken2022(solanaConnection, quoteMint);
+    const tokenProgramIdQuote = isT2022Quote ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+    const tokenTypeQuote = isT2022Quote ? 'token2022' : 'token';
+
     // Check if ATA exists in cache (no on-chain check during trading)
-    const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey);
+    const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey, solanaConnection, tokenTypeBase);
 
     let userBaseToken;
     console.log("check1", ataExistsInCache)
     if (ataExistsInCache) {
-      userBaseToken = await getAtaAddress(baseMint, walletPublicKey);
+      userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
       console.log("✅ Using cached ATA for base mint:", baseMintPubkey);
     } else {
-      userBaseToken = await getAtaAddress(baseMint, walletPublicKey);
+      userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
+
       const createAtaInstruction = createAssociatedTokenAccountInstruction(
         wallet.keypair.publicKey, // payer
         userBaseToken, // associated token account
         wallet.keypair.publicKey, // owner
-        baseMintPubkey // mint
+        baseMintPubkey, // mint
+        tokenProgramIdBase
       );
       instructions.push(createAtaInstruction);
     }
-    
+
     // Check if user has ATA for quote token
     let userQuoteToken;
-    const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey);
+    const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey, solanaConnection, tokenTypeQuote);
     console.log("check1", quoteAtaExistsInCache)
     if (quoteAtaExistsInCache) {
-      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey);
+      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey, solanaConnection);
       console.log("✅ Using cached ATA for quote mint:", quoteMintPubkey);
     } else {
-      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey);
+      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey, solanaConnection);
+
       const createQuoteAtaInstruction = createAssociatedTokenAccountInstruction(
         wallet.keypair.publicKey, // payer
         userQuoteToken, // associated token account
         wallet.keypair.publicKey, // owner
-        quoteMintPubkey // mint
+        quoteMintPubkey, // mint
+        tokenProgramIdQuote
       );
       instructions.push(createQuoteAtaInstruction);
     }
@@ -1078,39 +1138,52 @@ export async function buy_pumpswap_direct(mint, amount, context) {
     console.log("basemint:", baseMintPubkey)
     console.log("quotemint:", quoteMintPubkey)
 
+    // CRITICAL: Detect token types FIRST
+    const isT2022Base = await isToken2022(solanaConnection, baseMint);
+    const tokenProgramIdBase = isT2022Base ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+    const tokenTypeBase = isT2022Base ? 'token2022' : 'token';
+
+    const isT2022Quote = await isToken2022(solanaConnection, quoteMint);
+    const tokenProgramIdQuote = isT2022Quote ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+    const tokenTypeQuote = isT2022Quote ? 'token2022' : 'token';
+
     // Check if ATA exists in cache (no on-chain check during trading)
-    const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey);
+    const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey, solanaConnection, tokenTypeBase);
 
     let userBaseToken;
     console.log("check1", ataExistsInCache)
     if (ataExistsInCache) {
-      userBaseToken = await getAtaAddress(baseMint, walletPublicKey);
+      userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
       console.log("✅ Using cached ATA for base mint:", baseMintPubkey);
     } else {
-      userBaseToken = await getAtaAddress(baseMint, walletPublicKey);
+      userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
+
       const createAtaInstruction = createAssociatedTokenAccountInstruction(
         wallet.keypair.publicKey, // payer
         userBaseToken, // associated token account
         wallet.keypair.publicKey, // owner
-        baseMintPubkey // mint
+        baseMintPubkey, // mint
+        tokenProgramIdBase
       );
       instructions.push(createAtaInstruction);
     }
-    
+
     // Check if user has ATA for quote token
     let userQuoteToken;
-    const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey);
+    const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey, solanaConnection, tokenTypeQuote);
     console.log("check1", quoteAtaExistsInCache)
     if (quoteAtaExistsInCache) {
-      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey);
+      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey, solanaConnection);
       console.log("✅ Using cached ATA for quote mint:", quoteMintPubkey);
     } else {
-      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey);
+      userQuoteToken = await getAtaAddress(quoteMint, walletPublicKey, solanaConnection);
+
       const createQuoteAtaInstruction = createAssociatedTokenAccountInstruction(
         wallet.keypair.publicKey, // payer
         userQuoteToken, // associated token account
         wallet.keypair.publicKey, // owner
-        quoteMintPubkey // mint
+        quoteMintPubkey, // mint
+        tokenProgramIdQuote
       );
       instructions.push(createQuoteAtaInstruction);
     }
