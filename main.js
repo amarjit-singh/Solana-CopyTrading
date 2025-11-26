@@ -33,8 +33,48 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 console.log(__dirname);
 dotenv.config();
-const buyAmount = process.env.BUY_AMOUNT;
-const BUY_AMOUNT_PERCENTAGE = parseFloat(process.env.BUY_AMOUNT_PERCENTAGE) || 0.01; // Percentage of target wallet's SOL change
+
+// ============================================================================
+// REQUIRED CONFIGURATION VALIDATION
+// ============================================================================
+const buyAmount = process.env.BUY_AMOUNT ? parseFloat(process.env.BUY_AMOUNT) : null;
+const BUY_AMOUNT_PERCENTAGE = process.env.BUY_AMOUNT_PERCENTAGE ? parseFloat(process.env.BUY_AMOUNT_PERCENTAGE) : null;
+const minAmount = process.env.MIN_AMOUNT ? parseFloat(process.env.MIN_AMOUNT) : null;
+const maxAmount = process.env.MAX_AMOUNT ? parseFloat(process.env.MAX_AMOUNT) : null;
+
+// Validate that exactly one of BUY_AMOUNT or BUY_AMOUNT_PERCENTAGE is set
+const hasBuyAmount = buyAmount !== null && !isNaN(buyAmount) && buyAmount > 0;
+const hasBuyPercentage = BUY_AMOUNT_PERCENTAGE !== null && !isNaN(BUY_AMOUNT_PERCENTAGE) && BUY_AMOUNT_PERCENTAGE > 0;
+
+if (!hasBuyAmount && !hasBuyPercentage) {
+  console.error(chalk.red(`❌ FATAL: Neither BUY_AMOUNT nor BUY_AMOUNT_PERCENTAGE is set in .env file`));
+  console.error(chalk.yellow(`You must set exactly ONE of:`));
+  console.error(chalk.yellow(`  • BUY_AMOUNT=0.0001 (fixed amount in SOL)`));
+  console.error(chalk.yellow(`  • BUY_AMOUNT_PERCENTAGE=0.5 (50% of target wallet's buy amount)`));
+  process.exit(1);
+}
+
+if (hasBuyAmount && hasBuyPercentage) {
+  console.error(chalk.red(`❌ FATAL: Both BUY_AMOUNT and BUY_AMOUNT_PERCENTAGE are set in .env file`));
+  console.error(chalk.yellow(`You can only set ONE of them, not both:`));
+  console.error(chalk.yellow(`  • For fixed amount: Set BUY_AMOUNT and remove/comment out BUY_AMOUNT_PERCENTAGE`));
+  console.error(chalk.yellow(`  • For percentage: Set BUY_AMOUNT_PERCENTAGE and remove/comment out BUY_AMOUNT`));
+  process.exit(1);
+}
+
+// Validate MIN_AMOUNT and MAX_AMOUNT
+if (minAmount === null || isNaN(minAmount)) {
+  console.error(chalk.red(`❌ FATAL: MIN_AMOUNT is not set in .env file`));
+  console.error(chalk.yellow(`Please add MIN_AMOUNT to your .env file (example: MIN_AMOUNT=0.00005)`));
+  process.exit(1);
+}
+
+if (maxAmount === null || isNaN(maxAmount)) {
+  console.error(chalk.red(`❌ FATAL: MAX_AMOUNT is not set in .env file`));
+  console.error(chalk.yellow(`Please add MAX_AMOUNT to your .env file (example: MAX_AMOUNT=0.001)`));
+  process.exit(1);
+}
+
 const GRPC_ENDPOINT = process.env.GRPC_ENDPOINT;
 const GRPCTOKEN = process.env.GRPCTOKEN;
 const MY_WALLET = process.env.PUB_KEY;
@@ -46,9 +86,6 @@ const COPY_SELL_COOLDOWN = parseInt(process.env.COPY_SELL_COOLDOWN) || 30000; //
 const COPY_SELL_PERCENTAGE = parseFloat(process.env.COPY_SELL_PERCENTAGE) || 100; // Default to 100% (sell all)
 const COPY_SELL_MODE = process.env.COPY_SELL_MODE || "percentage"; // "percentage" or "full"
 const SKIP_STARTUP_CLEANUP = process.env.SKIP_STARTUP_CLEANUP === "true"; // Set to true to keep existing tokens on startup
- // Ensure minimum and maximum bounds for safety
- const minAmount = process.env.MIN_AMOUNT || 0.04;
- const maxAmount = process.env.MAX_AMOUNT || 0.5;  // Maximum 0.5 SOL
 
 // In-memory bought tokens cache for copy trading (ULTRA FAST)
 let boughtTokensCache = new Map(); // tokenMint -> {amount, buyPrice, buyTime, walletAddress}
@@ -2285,12 +2322,13 @@ function calculateDynamicBuyAmount(solChanges,BUY_AMOUNT_PERCENTAGE ) {
     
     const clampedAmount = Math.max(minAmount, Math.min(maxAmount, dynamicAmount));
 
-    // console.log(chalk.cyan(`[${utcNow()}] 💰 Dynamic Buy Amount Calculation:`));
-    // console.log(chalk.cyan(`   • Target SOL Change: ${solChangesInSol.toFixed(4)} SOL`));
-    // console.log(chalk.cyan(`   • Percentage: ${(BUY_AMOUNT_PERCENTAGE * 100).toFixed(1)}%`));
-    // console.log(chalk.cyan(`   • Calculated Amount: ${dynamicAmount.toFixed(4)} SOL`));
-    // console.log(chalk.cyan(`   • Final Amount (clamped): ${clampedAmount.toFixed(4)} SOL`));
-    
+    console.log(chalk.cyan(`[${utcNow()}] 💰 Dynamic Buy Amount Calculation:`));
+    console.log(chalk.cyan(`   • Target SOL Change: ${solChangesInSol.toFixed(6)} SOL`));
+    console.log(chalk.cyan(`   • Percentage: ${(BUY_AMOUNT_PERCENTAGE * 100).toFixed(1)}%`));
+    console.log(chalk.cyan(`   • Calculated Amount: ${dynamicAmount.toFixed(6)} SOL`));
+    console.log(chalk.cyan(`   • MIN_AMOUNT: ${minAmount}, MAX_AMOUNT: ${maxAmount}`));
+    console.log(chalk.cyan(`   • Final Amount (clamped): ${clampedAmount.toFixed(6)} SOL`));
+
     return clampedAmount;
   } catch (error) {
     console.error(chalk.red(`[${utcNow()}] ❌ Error calculating dynamic buy amount: ${error.message}`));
