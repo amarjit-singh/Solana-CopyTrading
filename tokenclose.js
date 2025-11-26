@@ -19,7 +19,7 @@ import dotenv from "dotenv";
 import bs58 from "bs58";
 dotenv.config();
 import { swap } from "./swap.js";
-import { removeAtaFromCache } from "./ata_cache.js";
+import { updateOnChainStatus } from "./ata_cache.js";
 import { decodePrivateKey } from "./swap.js";
 
 // WSOL mint address (mainnet)
@@ -68,7 +68,8 @@ async function closeTokenAccount(connection, payer, tokenAccount, owner) {
       console.log(`💰 Swapping all tokens for mint: ${mint} (amount: ${tokenAmount})`);
       const swapTxid = await swap("SELL", mint, Number(tokenAmount));
       if (swapTxid && swapTxid !== "stop") {
-        removeAtaFromCache(mint, owner.toString());
+        // Mark ATA as not on-chain after successful full sell (swap already handles this, but ensure consistency)
+        updateOnChainStatus(mint, owner.toString(), false);
         console.log(`✅ Successfully swapped tokens! Transaction: https://solscan.io/tx/${swapTxid}`);
         // Wait a bit for the swap to settle
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -101,7 +102,12 @@ async function closeTokenAccount(connection, payer, tokenAccount, owner) {
       skipPreflight: false,
       maxRetries: 2,
     });
-    
+
+    // Mark ATA as not on-chain after successful close
+    if (txid) {
+      updateOnChainStatus(mint, owner.toString(), false);
+    }
+
     return txid;
   } catch (error) {
     console.error(`Failed to close token account ${tokenAccount.pubkey.toString()}:`, error);

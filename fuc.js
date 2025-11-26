@@ -443,3 +443,106 @@ export const checkWalletBalance = async (requiredAmount = 0) => {
     throw error;
   }
 };
+
+// WSOL mint address (mainnet) - skip this when selling all tokens
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+/**
+ * Get all SPL token accounts with non-zero balance for the wallet
+ * @returns {Promise<Array>} Array of token account info {mint, balance, uiBalance}
+ */
+export const getAllTokenAccounts = async () => {
+  try {
+    const publicKey = process.env.PUB_KEY;
+    if (!publicKey) {
+      throw new Error("PUB_KEY not found in environment variables");
+    }
+
+    const walletPubkey = new PublicKey(publicKey);
+
+    // Get all token accounts for standard tokens
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    // Get all token accounts for Token2022
+    const token2022Accounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+      programId: TOKEN_2022_PROGRAM_ID,
+    });
+
+    // Combine and filter accounts with non-zero balance, excluding WSOL
+    const allAccounts = [...tokenAccounts.value, ...token2022Accounts.value];
+    const tokensWithBalance = allAccounts
+      .map(account => {
+        const info = account.account.data.parsed.info;
+        return {
+          mint: info.mint,
+          balance: parseInt(info.tokenAmount.amount),
+          uiBalance: parseFloat(info.tokenAmount.uiAmount || 0),
+          decimals: info.tokenAmount.decimals,
+          pubkey: account.pubkey.toString()
+        };
+      })
+      .filter(token => token.balance > 0 && token.mint !== WSOL_MINT);
+
+    return tokensWithBalance;
+  } catch (error) {
+    console.error(chalk.red(`[${new Date().toISOString()}] ❌ Error getting token accounts: ${error.message}`));
+    throw error;
+  }
+};
+
+/**
+ * Get all SPL token accounts with ZERO balance for the wallet (for closing ATAs)
+ * @returns {Promise<Array>} Array of token account info {mint, pubkey, programId}
+ */
+export const getZeroBalanceTokenAccounts = async () => {
+  try {
+    const publicKey = process.env.PUB_KEY;
+    if (!publicKey) {
+      throw new Error("PUB_KEY not found in environment variables");
+    }
+
+    const walletPubkey = new PublicKey(publicKey);
+
+    // Get all token accounts for standard tokens
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    // Get all token accounts for Token2022
+    const token2022Accounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+      programId: TOKEN_2022_PROGRAM_ID,
+    });
+
+    // Filter accounts with zero balance, excluding WSOL
+    const zeroBalanceAccounts = [];
+
+    for (const account of tokenAccounts.value) {
+      const info = account.account.data.parsed.info;
+      if (parseInt(info.tokenAmount.amount) === 0 && info.mint !== WSOL_MINT) {
+        zeroBalanceAccounts.push({
+          mint: info.mint,
+          pubkey: account.pubkey,
+          programId: TOKEN_PROGRAM_ID,
+        });
+      }
+    }
+
+    for (const account of token2022Accounts.value) {
+      const info = account.account.data.parsed.info;
+      if (parseInt(info.tokenAmount.amount) === 0 && info.mint !== WSOL_MINT) {
+        zeroBalanceAccounts.push({
+          mint: info.mint,
+          pubkey: account.pubkey,
+          programId: TOKEN_2022_PROGRAM_ID,
+        });
+      }
+    }
+
+    return zeroBalanceAccounts;
+  } catch (error) {
+    console.error(chalk.red(`[${new Date().toISOString()}] ❌ Error getting zero balance token accounts: ${error.message}`));
+    throw error;
+  }
+};

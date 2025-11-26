@@ -4,19 +4,14 @@ import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, get
 import { getAccount } from "@solana/spl-token";
 
 const ATA_CACHE_FILE = "ata_cache.json";
-const TOKEN_TYPE_CACHE_FILE = "token_type_cache.json";
 
 // Ultra-fast in-memory cache with immediate loading
+// Cache format: { "{mint}_{walletPublicKey}": { ata: "{address}", type: "{tokenType}", onChain: true/false } }
 let ataCache = new Map();
-let tokenTypeCache = new Map(); // Cache to store if a token is Token2022
 let cacheLoaded = false;
-let tokenTypeCacheLoaded = false;
 let saveTimeout = null;
-let tokenTypeSaveTimeout = null;
 let saveQueue = new Set(); // Track pending saves
-let tokenTypeSaveQueue = new Set();
 let isSaving = false;
-let isTokenTypeSaving = false;
 
 // Immediate cache loading for instant access
 function loadAtaCacheSync() {
@@ -26,7 +21,25 @@ function loadAtaCacheSync() {
     if (fs.existsSync(ATA_CACHE_FILE)) {
       const data = fs.readFileSync(ATA_CACHE_FILE, "utf8");
       const cacheData = JSON.parse(data);
-      ataCache = new Map(Object.entries(cacheData));
+
+      // Handle migration from old format to new format
+      const migratedData = {};
+      for (const [key, value] of Object.entries(cacheData)) {
+        if (typeof value === 'string') {
+          // Old format: value is just the ATA address string
+          // Migrate to new format with default type 'token' and onChain true
+          const newKey = key.endsWith('_token') || key.endsWith('_token2022')
+            ? key.replace(/_token2022$/, '').replace(/_token$/, '')
+            : key;
+          const tokenType = key.endsWith('_token2022') ? 'token2022' : 'token';
+          migratedData[newKey] = { ata: value, type: tokenType, onChain: true };
+        } else if (typeof value === 'object' && value.ata) {
+          // New format: already has the correct structure
+          migratedData[key] = value;
+        }
+      }
+
+      ataCache = new Map(Object.entries(migratedData));
     }
   } catch (error) {
     ataCache = new Map();
@@ -35,31 +48,14 @@ function loadAtaCacheSync() {
   cacheLoaded = true;
 }
 
-// Load token type cache synchronously
-function loadTokenTypeCacheSync() {
-  if (tokenTypeCacheLoaded) return;
-
-  try {
-    if (fs.existsSync(TOKEN_TYPE_CACHE_FILE)) {
-      const data = fs.readFileSync(TOKEN_TYPE_CACHE_FILE, "utf8");
-      const cacheData = JSON.parse(data);
-      tokenTypeCache = new Map(Object.entries(cacheData));
-    }
-  } catch (error) {
-    tokenTypeCache = new Map();
-  }
-
-  tokenTypeCacheLoaded = true;
-}
-
 // Background save function - runs asynchronously without blocking
 async function performBackgroundSave() {
   if (isSaving || saveQueue.size === 0) return;
-  
+
   isSaving = true;
   const keysToSave = Array.from(saveQueue);
   saveQueue.clear();
-  
+
   try {
     const cacheObject = Object.fromEntries(ataCache);
     await fs.promises.writeFile(ATA_CACHE_FILE, JSON.stringify(cacheObject, null, 2));
@@ -69,7 +65,7 @@ async function performBackgroundSave() {
     keysToSave.forEach(key => saveQueue.add(key));
   } finally {
     isSaving = false;
-    
+
     // Process any new items that were added while saving
     if (saveQueue.size > 0) {
       setTimeout(performBackgroundSave, 10);
@@ -88,40 +84,6 @@ function scheduleBackgroundSave() {
   }, 50); // Reduced delay for faster batching
 }
 
-// Background save function for token type cache
-async function performTokenTypeBackgroundSave() {
-  if (isTokenTypeSaving || tokenTypeSaveQueue.size === 0) return;
-
-  isTokenTypeSaving = true;
-  const keysToSave = Array.from(tokenTypeSaveQueue);
-  tokenTypeSaveQueue.clear();
-
-  try {
-    const cacheObject = Object.fromEntries(tokenTypeCache);
-    await fs.promises.writeFile(TOKEN_TYPE_CACHE_FILE, JSON.stringify(cacheObject, null, 2));
-  } catch (error) {
-    console.warn("Background token type cache save failed:", error.message);
-    keysToSave.forEach(key => tokenTypeSaveQueue.add(key));
-  } finally {
-    isTokenTypeSaving = false;
-
-    if (tokenTypeSaveQueue.size > 0) {
-      setTimeout(performTokenTypeBackgroundSave, 10);
-    }
-  }
-}
-
-// Schedule background save for token type cache
-function scheduleTokenTypeBackgroundSave() {
-  if (tokenTypeSaveTimeout) {
-    clearTimeout(tokenTypeSaveTimeout);
-  }
-
-  tokenTypeSaveTimeout = setTimeout(() => {
-    performTokenTypeBackgroundSave();
-  }, 50);
-}
-
 // Load ATA cache from file (async version for validation)
 async function loadAtaCache(connection = null) {
   if (!cacheLoaded) {
@@ -130,29 +92,24 @@ async function loadAtaCache(connection = null) {
     // Background validation if connection provided
     if (connection) {
       setImmediate(async () => {
-        const invalidEntries = [];
-        for (const [key, ataAddress] of ataCache.entries()) {
-          // Skip token type entries (they're not ATAs)
-          if (key.startsWith('token_type_')) continue;
-
+        for (const [key, cacheEntry] of ataCache.entries()) {
           try {
-            // Determine token program from cache key format
-            let tokenProgramId = TOKEN_PROGRAM_ID;
-            if (key.endsWith('_token2022')) {
-              tokenProgramId = TOKEN_2022_PROGRAM_ID;
+            const tokenProgramId = cacheEntry.type === 'token2022' ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+            await getAccount(connection, new PublicKey(cacheEntry.ata), 'confirmed', tokenProgramId);
+            // Update onChain status if it was false
+            if (!cacheEntry.onChain) {
+              cacheEntry.onChain = true;
+              saveQueue.add(key);
             }
-
-            await getAccount(connection, new PublicKey(ataAddress), 'confirmed', tokenProgramId);
           } catch (e) {
             if (e.message && e.message.includes("Failed to find account")) {
-              invalidEntries.push(key);
+              // Mark as not on-chain instead of deleting
+              cacheEntry.onChain = false;
+              saveQueue.add(key);
             }
           }
         }
-        for (const key of invalidEntries) {
-          ataCache.delete(key);
-        }
-        if (invalidEntries.length > 0) {
+        if (saveQueue.size > 0) {
           scheduleBackgroundSave();
         }
       });
@@ -161,138 +118,114 @@ async function loadAtaCache(connection = null) {
 }
 
 // Ultra-fast cache check - no async operations
-// tokenType: 'token' or 'token2022', defaults to 'token' for backward compatibility
-function hasAtaInCacheSync(mint, walletPublicKey, tokenType = 'token') {
+function hasAtaInCacheSync(mint, walletPublicKey, tokenType = null) {
   if (!cacheLoaded) loadAtaCacheSync();
-  const key = `${mint}_${walletPublicKey}_${tokenType}`;
+  const key = `${mint}_${walletPublicKey}`;
 
-  // Check new key format first
-  if (ataCache.has(key)) {
-    return true;
-  }
+  if (!ataCache.has(key)) return false;
 
-  // ONLY check old key format for regular tokens (not Token2022)
-  // This prevents Token2022 lookups from finding regular token cache entries
-  if (tokenType === 'token') {
-    const oldKey = `${mint}_${walletPublicKey}`;
-    return ataCache.has(oldKey);
-  }
+  const cacheEntry = ataCache.get(key);
 
-  return false;
+  // If tokenType specified, check if it matches
+  if (tokenType && cacheEntry.type !== tokenType) return false;
+
+  return true;
 }
 
 // Ultra-fast ATA address retrieval from cache only (no on-chain validation)
-// tokenType: 'token' or 'token2022', defaults to 'token' for backward compatibility
-function getAtaAddressSync(mint, walletPublicKey, tokenType = 'token') {
+function getAtaAddressSync(mint, walletPublicKey, tokenType = null) {
   if (!cacheLoaded) loadAtaCacheSync();
-  const key = `${mint}_${walletPublicKey}_${tokenType}`;
+  const key = `${mint}_${walletPublicKey}`;
 
-  if (ataCache.has(key)) {
-    return new PublicKey(ataCache.get(key));
-  }
+  if (!ataCache.has(key)) return null;
 
-  // ONLY check old key format for regular tokens (not Token2022)
-  // This prevents Token2022 lookups from getting regular token ATA addresses
-  if (tokenType === 'token') {
-    const oldKey = `${mint}_${walletPublicKey}`;
-    if (ataCache.has(oldKey)) {
-      return new PublicKey(ataCache.get(oldKey));
-    }
-  }
+  const cacheEntry = ataCache.get(key);
 
-  return null;
+  // If tokenType specified, check if it matches
+  if (tokenType && cacheEntry.type !== tokenType) return null;
+
+  return new PublicKey(cacheEntry.ata);
+}
+
+// Get full cache entry (includes ata, type, onChain)
+function getCacheEntrySync(mint, walletPublicKey) {
+  if (!cacheLoaded) loadAtaCacheSync();
+  const key = `${mint}_${walletPublicKey}`;
+  return ataCache.get(key) || null;
 }
 
 // Check if ATA exists in cache (async wrapper for compatibility)
-async function hasAtaInCache(mint, walletPublicKey, connection = null, tokenType = 'token') {
+// eslint-disable-next-line no-unused-vars
+async function hasAtaInCache(mint, walletPublicKey, _connection = null, tokenType = null) {
   // Use sync version for immediate response
   return hasAtaInCacheSync(mint, walletPublicKey, tokenType);
 }
 
 // Add ATA to cache (immediate in-memory, background save)
-function addAtaToCache(mint, walletPublicKey, ataAddress, connection = null, tokenType = 'token') {
+function addAtaToCache(mint, walletPublicKey, ataAddress, tokenType = 'token', onChain = true) {
   if (!cacheLoaded) loadAtaCacheSync();
-  const key = `${mint}_${walletPublicKey}_${tokenType}`;
-  ataCache.set(key, ataAddress);
+  const key = `${mint}_${walletPublicKey}`;
+  ataCache.set(key, { ata: ataAddress, type: tokenType, onChain: onChain });
   saveQueue.add(key);
   scheduleBackgroundSave();
 }
 
-// Remove ATA from cache (immediate in-memory, background save)
-function removeAtaFromCache(mint, walletPublicKey, connection = null, tokenType = null) {
+// Update onChain status in cache
+function updateOnChainStatus(mint, walletPublicKey, onChain) {
   if (!cacheLoaded) loadAtaCacheSync();
+  const key = `${mint}_${walletPublicKey}`;
 
-  // If tokenType is provided, remove specific entry
-  if (tokenType) {
-    const key = `${mint}_${walletPublicKey}_${tokenType}`;
-    if (ataCache.has(key)) {
-      ataCache.delete(key);
-      saveQueue.add(key);
-      scheduleBackgroundSave();
-      return true;
-    }
-    return false;
+  if (ataCache.has(key)) {
+    const cacheEntry = ataCache.get(key);
+    cacheEntry.onChain = onChain;
+    saveQueue.add(key);
+    scheduleBackgroundSave();
+    return true;
   }
+  return false;
+}
 
-  // Otherwise remove both token and token2022 entries
-  let removed = false;
-  const key = `${mint}_${walletPublicKey}_token`;
-  const key2022 = `${mint}_${walletPublicKey}_token2022`;
-  const oldKey = `${mint}_${walletPublicKey}`;
+// Remove ATA from cache (immediate in-memory, background save)
+function removeAtaFromCache(mint, walletPublicKey) {
+  if (!cacheLoaded) loadAtaCacheSync();
+  const key = `${mint}_${walletPublicKey}`;
 
   if (ataCache.has(key)) {
     ataCache.delete(key);
     saveQueue.add(key);
-    removed = true;
-  }
-  if (ataCache.has(key2022)) {
-    ataCache.delete(key2022);
-    saveQueue.add(key2022);
-    removed = true;
-  }
-  if (ataCache.has(oldKey)) {
-    ataCache.delete(oldKey);
-    saveQueue.add(oldKey);
-    removed = true;
-  }
-
-  if (removed) {
     scheduleBackgroundSave();
+    return true;
   }
-  return removed;
+  return false;
 }
 
-// Detect if a token is Token2022
+// Detect if a token is Token2022 (uses cache first)
 async function isToken2022(connection, mint) {
   if (!connection) return false;
-
-  // Load token type cache
-  if (!tokenTypeCacheLoaded) loadTokenTypeCacheSync();
+  if (!cacheLoaded) loadAtaCacheSync();
 
   const mintStr = typeof mint === 'string' ? mint : mint.toString();
 
-  // Check cache first
-  if (tokenTypeCache.has(mintStr)) {
-    return tokenTypeCache.get(mintStr) === 'token2022';
+  // Check if we have any cache entry with this mint that has type info
+  // We iterate to find any entry with this mint
+  for (const [key, cacheEntry] of ataCache.entries()) {
+    if (key.startsWith(mintStr + '_')) {
+      return cacheEntry.type === 'token2022';
+    }
   }
 
+  // Not in cache, detect from chain
   try {
     const mintPubkey = typeof mint === 'string' ? new PublicKey(mint) : mint;
 
     // Try to get mint info with Token2022 program first
     try {
       await getMint(connection, mintPubkey, 'confirmed', TOKEN_2022_PROGRAM_ID);
-      tokenTypeCache.set(mintStr, 'token2022');
-      tokenTypeSaveQueue.add(mintStr);
-      scheduleTokenTypeBackgroundSave();
       return true;
     } catch (e) {
       // If it fails, try with regular token program
       try {
         await getMint(connection, mintPubkey, 'confirmed', TOKEN_PROGRAM_ID);
-        tokenTypeCache.set(mintStr, 'token');
-        tokenTypeSaveQueue.add(mintStr);
-        scheduleTokenTypeBackgroundSave();
         return false;
       } catch (e2) {
         // If both fail, assume regular token
@@ -305,32 +238,51 @@ async function isToken2022(connection, mint) {
   }
 }
 
+// Get token type from cache (sync, returns null if not cached)
+function getTokenTypeSync(mint) {
+  if (!cacheLoaded) loadAtaCacheSync();
+  const mintStr = typeof mint === 'string' ? mint : mint.toString();
+
+  // Find any cache entry with this mint
+  for (const [key, cacheEntry] of ataCache.entries()) {
+    if (key.startsWith(mintStr + '_')) {
+      return cacheEntry.type;
+    }
+  }
+  return null;
+}
+
 // Ultra-fast ATA address retrieval with optimized caching
 async function getAtaAddress(mint, walletPublicKey, connection = null) {
   // Immediate cache check without async operations
   if (!cacheLoaded) loadAtaCacheSync();
 
-  // Detect if this is a Token2022 token
-  const isT2022 = connection ? await isToken2022(connection, mint) : false;
-  const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-  const tokenType = isT2022 ? 'token2022' : 'token';
-
-  const key = `${mint}_${walletPublicKey}_${tokenType}`;
+  const mintStr = typeof mint === 'string' ? mint : mint.toString();
+  const walletStr = typeof walletPublicKey === 'string' ? walletPublicKey : walletPublicKey.toString();
+  const key = `${mintStr}_${walletStr}`;
 
   // Ultra-fast cache hit path
   if (ataCache.has(key)) {
-    const cachedAta = ataCache.get(key);
-    const cachedAtaPublicKey = new PublicKey(cachedAta);
+    const cacheEntry = ataCache.get(key);
+    const cachedAtaPublicKey = new PublicKey(cacheEntry.ata);
 
     // Only validate on-chain if connection provided and we need to be sure
     if (connection) {
       try {
-        // CRITICAL: Pass tokenProgramId to avoid TokenInvalidAccountOwnerError for Token2022
+        const tokenProgramId = cacheEntry.type === 'token2022' ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
         await getAccount(connection, cachedAtaPublicKey, 'confirmed', tokenProgramId);
+
+        // Update onChain status if needed
+        if (!cacheEntry.onChain) {
+          cacheEntry.onChain = true;
+          saveQueue.add(key);
+          scheduleBackgroundSave();
+        }
         return cachedAtaPublicKey;
       } catch (e) {
         if (e.message && e.message.includes("Failed to find account")) {
-          ataCache.delete(key);
+          // Mark as not on-chain
+          cacheEntry.onChain = false;
           saveQueue.add(key);
           scheduleBackgroundSave();
         } else {
@@ -342,32 +294,10 @@ async function getAtaAddress(mint, walletPublicKey, connection = null) {
     }
   }
 
-  // ONLY check old key format for regular tokens (not Token2022)
-  // This prevents Token2022 lookups from getting regular token ATA addresses
-  if (tokenType === 'token') {
-    const oldKey = `${mint}_${walletPublicKey}`;
-    if (ataCache.has(oldKey)) {
-      const cachedAta = ataCache.get(oldKey);
-      const cachedAtaPublicKey = new PublicKey(cachedAta);
-
-      // Validate and migrate to new key format
-      if (connection) {
-        try {
-          // CRITICAL: Pass tokenProgramId to avoid TokenInvalidAccountOwnerError
-          await getAccount(connection, cachedAtaPublicKey, 'confirmed', tokenProgramId);
-          // Migrate to new key format
-          ataCache.delete(oldKey);
-          addAtaToCache(mint, walletPublicKey, cachedAta, connection, tokenType);
-          return cachedAtaPublicKey;
-        } catch (e) {
-          // Old cached entry is invalid, remove it
-          ataCache.delete(oldKey);
-          saveQueue.add(oldKey);
-          scheduleBackgroundSave();
-        }
-      }
-    }
-  }
+  // Detect if this is a Token2022 token
+  const isT2022 = connection ? await isToken2022(connection, mint) : false;
+  const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const tokenType = isT2022 ? 'token2022' : 'token';
 
   // Calculate new ATA address with correct token program
   const ataAddress = await getAssociatedTokenAddress(
@@ -377,8 +307,19 @@ async function getAtaAddress(mint, walletPublicKey, connection = null) {
     tokenProgramId
   );
 
+  // Check if ATA exists on-chain
+  let onChain = false;
+  if (connection) {
+    try {
+      await getAccount(connection, ataAddress, 'confirmed', tokenProgramId);
+      onChain = true;
+    } catch (e) {
+      onChain = false;
+    }
+  }
+
   // Add to cache immediately (non-blocking)
-  addAtaToCache(mint, walletPublicKey, ataAddress.toString(), connection, tokenType);
+  addAtaToCache(mintStr, walletStr, ataAddress.toString(), tokenType, onChain);
 
   return ataAddress;
 }
@@ -392,41 +333,28 @@ function clearAtaCache() {
   }
 }
 
-// Clear old format cache entries (without token type suffix)
-// This helps clean up legacy cache entries that might interfere with Token2022
-function clearOldFormatCacheEntries() {
-  if (!cacheLoaded) loadAtaCacheSync();
-
-  let clearedCount = 0;
-  const keysToDelete = [];
-
-  // Find all old format keys (those without _token or _token2022 suffix)
-  for (const key of ataCache.keys()) {
-    if (!key.endsWith('_token') && !key.endsWith('_token2022')) {
-      keysToDelete.push(key);
-    }
-  }
-
-  // Delete old format keys
-  for (const key of keysToDelete) {
-    ataCache.delete(key);
-    saveQueue.add(key);
-    clearedCount++;
-  }
-
-  if (clearedCount > 0) {
-    console.log(`🧹 Cleared ${clearedCount} old format ATA cache entries`);
-    scheduleBackgroundSave();
-  }
-
-  return clearedCount;
-}
-
 // Get cache statistics
-function getAtaCacheStats(connection = null) {
+function getAtaCacheStats() {
   if (!cacheLoaded) loadAtaCacheSync();
+
+  let onChainCount = 0;
+  let offChainCount = 0;
+  let token2022Count = 0;
+  let tokenCount = 0;
+
+  for (const cacheEntry of ataCache.values()) {
+    if (cacheEntry.onChain) onChainCount++;
+    else offChainCount++;
+    if (cacheEntry.type === 'token2022') token2022Count++;
+    else tokenCount++;
+  }
+
   return {
     totalAtas: ataCache.size,
+    onChain: onChainCount,
+    offChain: offChainCount,
+    tokenCount: tokenCount,
+    token2022Count: token2022Count,
     cacheFile: ATA_CACHE_FILE,
     pendingSaves: saveQueue.size,
     isSaving: isSaving
@@ -442,6 +370,18 @@ function getAtaCacheStats(connection = null) {
  * @returns {Promise<boolean>} - True if exists, false otherwise
  */
 async function ataExistsOnChain(connection, mint, walletPublicKey) {
+  const mintStr = typeof mint === 'string' ? mint : mint.toString();
+  const walletStr = typeof walletPublicKey === 'string' ? walletPublicKey : walletPublicKey.toString();
+  const key = `${mintStr}_${walletStr}`;
+
+  // Check cache first for quick response
+  if (ataCache.has(key)) {
+    const cacheEntry = ataCache.get(key);
+    if (cacheEntry.onChain) {
+      return true; // Trust cached on-chain status
+    }
+  }
+
   // Detect token type to use correct program ID
   const isT2022 = await isToken2022(connection, mint);
   const tokenProgramId = isT2022 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
@@ -449,9 +389,13 @@ async function ataExistsOnChain(connection, mint, walletPublicKey) {
   const ataAddress = await getAtaAddress(mint, walletPublicKey, connection);
   try {
     await getAccount(connection, ataAddress, 'confirmed', tokenProgramId);
+
+    // Update cache
+    updateOnChainStatus(mintStr, walletStr, true);
     return true;
   } catch (e) {
     if (e.message && e.message.includes("Failed to find account")) {
+      updateOnChainStatus(mintStr, walletStr, false);
       return false;
     }
     throw e;
@@ -464,12 +408,12 @@ async function forceSave() {
     clearTimeout(saveTimeout);
     saveTimeout = null;
   }
-  
+
   // Wait for any ongoing save to complete
   while (isSaving) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  
+
   try {
     const cacheObject = Object.fromEntries(ataCache);
     await fs.promises.writeFile(ATA_CACHE_FILE, JSON.stringify(cacheObject, null, 2));
@@ -481,25 +425,23 @@ async function forceSave() {
 
 // Initialize cache immediately
 loadAtaCacheSync();
-loadTokenTypeCacheSync();
-
-// Auto-clear old format cache entries on startup to prevent Token2022 issues
-clearOldFormatCacheEntries();
 
 export {
   hasAtaInCache,
-  hasAtaInCacheSync, // New sync version for ultra-fast access
-  getAtaAddressSync, // Ultra-fast sync ATA address retrieval
+  hasAtaInCacheSync,
+  getAtaAddressSync,
+  getCacheEntrySync,
+  getTokenTypeSync,
   addAtaToCache,
+  updateOnChainStatus,
   removeAtaFromCache,
   getAtaAddress,
   clearAtaCache,
-  clearOldFormatCacheEntries, // Clear old cache entries
   getAtaCacheStats,
   loadAtaCache,
   ataExistsOnChain,
   forceSave,
-  isToken2022, // Export Token2022 detection function
+  isToken2022,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID
-}; 
+};

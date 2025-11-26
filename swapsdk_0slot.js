@@ -16,7 +16,7 @@ import {
 import chalk from "chalk";
 import { createPumpFunBuyInstruction, createPumpFunSellInstruction } from "./instruction_pumpfun.js";
 import { createPumpSwapBuyInstruction, createPumpSwapSellInstruction } from "./instruction_pumpswap.js";
-import { hasAtaInCache, hasAtaInCacheSync, addAtaToCache, removeAtaFromCache, getAtaAddress, getAtaAddressSync, isToken2022, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./ata_cache.js";
+import { hasAtaInCache, hasAtaInCacheSync, addAtaToCache, updateOnChainStatus, getAtaAddress, getAtaAddressSync, isToken2022, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./ata_cache.js";
 import { BlockhashManager } from "./blockhash_manager.js";
 dotenv.config();
 // PRI
@@ -458,8 +458,8 @@ export async function buy_pumpfun(mint, amount, context) {
       } catch (e) {
         ataExistsOnChain = false;
         console.log(`   ⚠️ Cached ATA does NOT exist on-chain - will create it`);
-        // Remove from cache since it doesn't exist
-        removeAtaFromCache(mint, walletPublicKey.toString(), solanaConnection, tokenType);
+        // Mark cache entry as not on-chain
+        updateOnChainStatus(mint, walletPublicKey.toString(), false);
       }
     } else {
       // ATA doesn't exist in cache, calculate it and add to cache
@@ -468,6 +468,7 @@ export async function buy_pumpfun(mint, amount, context) {
     }
 
     // Add ATA creation instruction if it doesn't exist on-chain
+    let creatingAta = false;
     if (!ataExistsOnChain) {
       console.log(`   ➕ Adding ATA creation instruction with ${tokenProgramId.toString()}`);
       instructions.push(
@@ -479,6 +480,7 @@ export async function buy_pumpfun(mint, amount, context) {
           tokenProgramId
         )
       );
+      creatingAta = true;
       console.log(`   ✅ ATA instruction added (total instructions: ${instructions.length})`);
     }
 
@@ -583,6 +585,12 @@ export async function buy_pumpfun(mint, amount, context) {
     
     const totalDuration = Math.round((performance.now() - startTime) * 1000);
     console.log(`✅ ${utcNow()} BUY Pumpfun completed in ${totalDuration}μs - TX: ${txid}`);
+
+    // Optimistically mark ATA as on-chain after successful transaction send
+    if (creatingAta && txid) {
+      updateOnChainStatus(mint, walletPublicKey.toString(), true);
+    }
+
     return {txid, token_amount};
   } catch (error) {
     console.error("Error in buy_pumpfun:", error);
@@ -610,6 +618,7 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
   // const MAX_RETRIES = isFull ? MAX_RETRIES : 1;
   let attempt = 0;
   let lastError = null;
+  const swapMethod = (process.env.SWAP_METHOD || "solana").toLowerCase();
 
   while (attempt < MAX_RETRIES) {
     try {
@@ -685,31 +694,50 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: prioritizationFee }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 })
       );
-      // Add token close instruction if this is a full sell
-      // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
-      // that may leave dust amounts preventing clean close
+      // ============================================================================
+      // ATA CLOSE LOGIC - Different treatment for regular SPL vs Token2022
+      // ============================================================================
+      // Regular SPL tokens: Close ATA in same transaction (atomic with sell)
+      //   - Safe because no extensions that could leave dust
+      //   - Recovers rent immediately (~0.002 SOL)
+      //
+      // Token2022 tokens: Skip close during copy trading
+      //   - Extensions (transfer fees, interest) can leave "withheld" dust
+      //   - If close fails, ENTIRE transaction reverts (sell also fails!)
+      //   - ATAs cleaned up later during startup post-cleanup if truly empty
+      //   - Small rent cost is acceptable vs risk of failed sells
+      // ============================================================================
+      let shouldClose = false;
       if (isFull && !isT2022) {
-
         try {
-          // console.log(chalk.cyan(`🔒 Adding token close instruction for full sell: ${mint}`));
-          const closeInstruction = createCloseAccountInstruction(
-            userAta, // token account to close
-            wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey, // authority
-            [], // multiSigners
-            tokenProgramId // CRITICAL: Use correct token program for Token2022
-          );
-          instructions.push(closeInstruction);
+          const actualBalance = await getSplTokenBalance(mint);
+          // Only close if we're selling all or more than the actual balance
+          if (token_amount >= actualBalance) {
+            shouldClose = true;
+            const closeInstruction = createCloseAccountInstruction(
+              userAta, // token account to close
+              wallet.keypair.publicKey, // destination (refund rent to payer)
+              wallet.keypair.publicKey, // authority
+              [], // multiSigners
+              tokenProgramId // CRITICAL: Use correct token program for Token2022
+            );
+            instructions.push(closeInstruction);
+            console.log(`🔒 Adding close instruction (selling ${token_amount} of ${actualBalance} total)`);
+          } else {
+            console.log(`⏭️ Skipping close instruction (selling ${token_amount} but ${actualBalance} total in account)`);
+          }
         } catch (error) {
           console.log(chalk.yellow(`⚠️ Could not add close instruction: ${error.message}`));
         }
+      } else if (isFull && isT2022) {
+        console.log(`⏭️ Skipping close for Token2022 (may have withheld dust from transfer fees)`);
       }
 
-      if (ENABLE_SWAP_TIP == true && isFull) {
+      if (swapMethod === "0slot" && isFull) {
         const tipTransferInstruction = SystemProgram.transfer({
-          fromPubkey: wallet.keypair.publicKey, // Sender's public key.
-          toPubkey: SLOT_TIP_ACCOUNT, // Tip receiver's public key.
-          lamports: SLOT_TIP_LAMPORTS, // Amount to transfer as a tip (0.001 SOL in this case).
+          fromPubkey: wallet.keypair.publicKey,
+          toPubkey: SLOT_TIP_ACCOUNT,
+          lamports: SLOT_TIP_LAMPORTS,
         });
         instructions.push(tipTransferInstruction);
       }
@@ -724,14 +752,14 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
       transaction.sign([wallet.keypair]);
 
       let txid = "";
-      
-      if (ENABLE_SWAP_TIP == true && isFull) {
-        // Send transaction with Keep-Alive optimized connection
+
+      if (swapMethod === "0slot" && isFull) {
+        // Send transaction with 0slot connection (requires tip)
         txid = await SLOT_connection.sendRawTransaction(transaction.serialize(), {
           skipPreflight: true,
           maxRetries: 10,
         });
-        
+
       } else {
         console.log("sending sell tx with Solana Keep-Alive");
         txid = await solanaConnection.sendRawTransaction(transaction.serialize(), {
@@ -752,9 +780,11 @@ export async function sell_pumpfun(mint, token_amount, isFull, context) {
       if (confirmation.value && confirmation.value.err) {
         throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
-      if (txid && isFull) {
-        // Remove ATA from cache since we're closing the account (remove both types)
-        removeAtaFromCache(mint, walletPublicKey);
+      if (txid && shouldClose) {
+        // SUCCESS: ATA closed (only regular SPL tokens reach here, not Token2022)
+        // Update cache: onChain=false so next buy creates new ATA
+        // Note: Token2022 ATAs keep onChain=true and are cleaned up during startup
+        updateOnChainStatus(mint, walletPublicKey, false);
       }
 
       console.log("SELL Pumpfun Transaction:", txid);
@@ -850,6 +880,7 @@ export async function buy_pumpswap(mint, amount, context) {
     const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey, solanaConnection, tokenTypeBase);
 
     let userBaseToken;
+    let creatingBaseAta = false;
     console.log("check1", ataExistsInCache)
     if (ataExistsInCache) {
       userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
@@ -865,10 +896,12 @@ export async function buy_pumpswap(mint, amount, context) {
         tokenProgramIdBase
       );
       instructions.push(createAtaInstruction);
+      creatingBaseAta = true;
     }
 
     // Check if user has ATA for quote token
     let userQuoteToken;
+    let creatingQuoteAta = false;
     const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey, solanaConnection, tokenTypeQuote);
     console.log("check1", quoteAtaExistsInCache)
     if (quoteAtaExistsInCache) {
@@ -885,6 +918,7 @@ export async function buy_pumpswap(mint, amount, context) {
         tokenProgramIdQuote
       );
       instructions.push(createQuoteAtaInstruction);
+      creatingQuoteAta = true;
     }
     const buyInstruction = await createPumpSwapBuyInstruction(
       pool,
@@ -935,12 +969,22 @@ export async function buy_pumpswap(mint, amount, context) {
       maxRetries: 10,
     });
 
+    // Mark ATAs as on-chain after successful transaction
+    if (txid) {
+      if (creatingBaseAta) {
+        updateOnChainStatus(baseMint, walletPublicKey, true);
+      }
+      if (creatingQuoteAta) {
+        updateOnChainStatus(quoteMint, walletPublicKey, true);
+      }
+    }
+
     console.log("BUY PumpSwap Transaction:", txid);
 
     return txid;
   } catch (e) {
     console.error("Buy transaction failed:", e);
-    
+
     // Enhanced error logging
     if (e.logs) {
       console.error("Transaction logs:", e.logs);
@@ -951,7 +995,7 @@ export async function buy_pumpswap(mint, amount, context) {
     if (e.signature) {
       console.error("Transaction signature:", e.signature);
     }
-    
+
     // Log additional context for debugging
     console.error("Context for debugging:");
     console.error("  Mint:", mint);
@@ -1040,24 +1084,28 @@ export async function sell_pumpswap(baseMint, token_amount, context, isFull) {
 
 
 
-      // Add token close instruction if this is a full sell
+      // Add token close instruction if this is a full sell AND we're selling all tokens
       // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
+      let closingAta = false;
       if (isFull && !DIRECT_ADDED_PUMPSWAP && !isT2022Base) {
         try {
-          const walletPublicKey = wallet.keypair.publicKey.toString();
-          const userAta = await getAtaAddress(baseMint, walletPublicKey);
-          // console.log(chalk.cyan(`🔒 Adding token close instruction for full sell: ${baseMint}`));
-          const closeInstruction = createCloseAccountInstruction(
-            userAta, // token account to close
-            wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey, // authority
-            [], // multiSigners
-            tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
-          );
-          instructions.push(closeInstruction);
-
-          // Remove ATA from cache since we're closing the account
-          removeAtaFromCache(baseMint, walletPublicKey);
+          const actualBalance = await getSplTokenBalance(baseMint);
+          // Only close if we're selling all or more than the actual balance
+          if (token_amount >= actualBalance) {
+            const userAta = await getAtaAddress(baseMint, walletPublicKey);
+            const closeInstruction = createCloseAccountInstruction(
+              userAta, // token account to close
+              wallet.keypair.publicKey, // destination (refund rent to payer)
+              wallet.keypair.publicKey, // authority
+              [], // multiSigners
+              tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
+            );
+            instructions.push(closeInstruction);
+            closingAta = true;
+            console.log(`🔒 Adding close instruction (selling ${token_amount} of ${actualBalance} total)`);
+          } else {
+            console.log(`⏭️ Skipping close instruction (selling ${token_amount} but ${actualBalance} total in account)`);
+          }
         } catch (error) {
           console.log(chalk.yellow(`⚠️ Could not add close instruction: ${error.message}`));
         }
@@ -1087,6 +1135,10 @@ export async function sell_pumpswap(baseMint, token_amount, context, isFull) {
         maxRetries: 2,
       });
 
+      // Mark ATA as not on-chain after successful close
+      if (closingAta) {
+        updateOnChainStatus(baseMint, walletPublicKey, false);
+      }
 
       console.log("SELL PumpSwap Transaction:", txid);
       return txid;
@@ -1161,6 +1213,7 @@ export async function buy_pumpswap_direct(mint, amount, context) {
     const ataExistsInCache = await hasAtaInCache(baseMint, walletPublicKey, solanaConnection, tokenTypeBase);
 
     let userBaseToken;
+    let creatingBaseAta = false;
     console.log("check1", ataExistsInCache)
     if (ataExistsInCache) {
       userBaseToken = await getAtaAddress(baseMint, walletPublicKey, solanaConnection);
@@ -1176,10 +1229,12 @@ export async function buy_pumpswap_direct(mint, amount, context) {
         tokenProgramIdBase
       );
       instructions.push(createAtaInstruction);
+      creatingBaseAta = true;
     }
 
     // Check if user has ATA for quote token
     let userQuoteToken;
+    let creatingQuoteAta = false;
     const quoteAtaExistsInCache = await hasAtaInCache(quoteMint, walletPublicKey, solanaConnection, tokenTypeQuote);
     console.log("check1", quoteAtaExistsInCache)
     if (quoteAtaExistsInCache) {
@@ -1196,6 +1251,7 @@ export async function buy_pumpswap_direct(mint, amount, context) {
         tokenProgramIdQuote
       );
       instructions.push(createQuoteAtaInstruction);
+      creatingQuoteAta = true;
     }
 
     console.log("📋 Creating buy instruction with accounts:");
@@ -1259,12 +1315,22 @@ export async function buy_pumpswap_direct(mint, amount, context) {
       maxRetries: 10,
     });
 
+    // Mark ATAs as on-chain after successful transaction
+    if (txid) {
+      if (creatingBaseAta) {
+        updateOnChainStatus(baseMint, walletPublicKey, true);
+      }
+      if (creatingQuoteAta) {
+        updateOnChainStatus(quoteMint, walletPublicKey, true);
+      }
+    }
+
     console.log("BUY PumpSwap Transaction:", txid);
 
     return txid;
   } catch (e) {
     console.error("Buy transaction failed:", e);
-    
+
     // Enhanced error logging
     if (e.logs) {
       console.error("Transaction logs:", e.logs);
@@ -1275,7 +1341,7 @@ export async function buy_pumpswap_direct(mint, amount, context) {
     if (e.signature) {
       console.error("Transaction signature:", e.signature);
     }
-    
+
     // Log additional context for debugging
     console.error("Context for debugging:");
     console.error("  Mint:", mint);
@@ -1362,27 +1428,28 @@ export async function sell_pumpswap_direct(baseMint, token_amount, context, isFu
     );
     instructions.push(buyInstruction);
 
-
-
-
-      // Add token close instruction if this is a full sell
+      // Add token close instruction if this is a full sell AND we're selling all tokens
       // IMPORTANT: Skip close for Token2022 due to potential extensions (transfer fees, etc.)
+      let closingAta = false;
       if (isFull && !DIRECT_ADDED_PUMPSWAP && !isT2022Base) {
         try {
-          const walletPublicKey = wallet.keypair.publicKey.toString();
-          const userAta = await getAtaAddress(baseMint, walletPublicKey);
-          // console.log(chalk.cyan(`🔒 Adding token close instruction for full sell: ${baseMint}`));
-          const closeInstruction = createCloseAccountInstruction(
-            userAta, // token account to close
-            wallet.keypair.publicKey, // destination (refund rent to payer)
-            wallet.keypair.publicKey, // authority
-            [], // multiSigners
-            tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
-          );
-          instructions.push(closeInstruction);
-
-          // Remove ATA from cache since we're closing the account
-          removeAtaFromCache(baseMint, walletPublicKey);
+          const actualBalance = await getSplTokenBalance(baseMint);
+          // Only close if we're selling all or more than the actual balance
+          if (token_amount >= actualBalance) {
+            const userAta = await getAtaAddress(baseMint, walletPublicKey);
+            const closeInstruction = createCloseAccountInstruction(
+              userAta, // token account to close
+              wallet.keypair.publicKey, // destination (refund rent to payer)
+              wallet.keypair.publicKey, // authority
+              [], // multiSigners
+              tokenProgramIdBase // CRITICAL: Use correct token program for Token2022
+            );
+            instructions.push(closeInstruction);
+            closingAta = true;
+            console.log(`🔒 Adding close instruction (selling ${token_amount} of ${actualBalance} total)`);
+          } else {
+            console.log(`⏭️ Skipping close instruction (selling ${token_amount} but ${actualBalance} total in account)`);
+          }
         } catch (error) {
           console.log(chalk.yellow(`⚠️ Could not add close instruction: ${error.message}`));
         }
@@ -1412,6 +1479,10 @@ export async function sell_pumpswap_direct(baseMint, token_amount, context, isFu
         maxRetries: 2,
       });
 
+      // Mark ATA as not on-chain after successful close
+      if (closingAta) {
+        updateOnChainStatus(baseMint, walletPublicKey, false);
+      }
 
       console.log("SELL PumpSwap Transaction:", txid);
       return txid;

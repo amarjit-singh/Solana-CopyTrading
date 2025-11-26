@@ -10,10 +10,16 @@ import {
   getSplTokenBalance,
   checkTransactionStatus,
   checkWalletBalance,
+  getAllTokenAccounts,
+  getZeroBalanceTokenAccounts,
 } from "./fuc.js";
+import { createCloseAccountInstruction } from "@solana/spl-token";
+import { Connection, PublicKey, LAMPORTS_PER_SOL, ComputeBudgetProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { swap, loadwallet, rpc_connection } from "./swap.js";
+import { getTokenTypeSync, updateOnChainStatus } from "./ata_cache.js";
 import { EventEmitter } from "events";
 import Client from "@triton-one/yellowstone-grpc";
-import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { CommitmentLevel } from "@triton-one/yellowstone-grpc";
 import dotenv from "dotenv";
 import crypto from 'crypto';
@@ -39,6 +45,7 @@ const ENABLE_COPY_SELL = process.env.ENABLE_COPY_SELL !== "false"; // Default to
 const COPY_SELL_COOLDOWN = parseInt(process.env.COPY_SELL_COOLDOWN) || 30000; // 30 seconds default cooldown between copy sells
 const COPY_SELL_PERCENTAGE = parseFloat(process.env.COPY_SELL_PERCENTAGE) || 100; // Default to 100% (sell all)
 const COPY_SELL_MODE = process.env.COPY_SELL_MODE || "percentage"; // "percentage" or "full"
+const SKIP_STARTUP_CLEANUP = process.env.SKIP_STARTUP_CLEANUP === "true"; // Set to true to keep existing tokens on startup
  // Ensure minimum and maximum bounds for safety
  const minAmount = process.env.MIN_AMOUNT || 0.04;
  const maxAmount = process.env.MAX_AMOUNT || 0.5;  // Maximum 0.5 SOL
@@ -1583,6 +1590,157 @@ export async function pump_geyser() {
     startFunction: startAllMonitors,
     stopFunction: stopAllMonitors,
   });
+
+  // Check existing portfolio before starting monitors (cleanup happens BEFORE gRPC monitoring begins)
+  console.log(chalk.bgCyan.black(`[${utcNow()}] 📦 CHECKING EXISTING PORTFOLIO...`));
+  try {
+    const existingTokens = await getAllTokenAccounts();
+    if (existingTokens.length === 0) {
+      console.log(chalk.green(`[${utcNow()}] ✅ No existing tokens in wallet - clean slate`));
+    } else {
+      console.log(chalk.yellow(`[${utcNow()}] 📦 Found ${existingTokens.length} existing token(s) with balance:`));
+      for (const token of existingTokens) {
+        const cachedType = getTokenTypeSync(token.mint);
+        const isPumpToken = cachedType === 'pumpfun' || token.mint.toLowerCase().endsWith('pump');
+        const tokenType = isPumpToken ? 'pumpfun' : (cachedType || 'unknown');
+        console.log(chalk.yellow(`[${utcNow()}]   - ${token.mint.slice(0, 8)}...: ${token.uiBalance.toLocaleString()} tokens [${tokenType}]`));
+      }
+
+      // Startup cleanup: Sell all existing tokens by default (skip only if explicitly disabled)
+      if (SKIP_STARTUP_CLEANUP) {
+        console.log(chalk.yellow(`[${utcNow()}] ⚠️ SKIP_STARTUP_CLEANUP=true - Keeping existing tokens`));
+        console.log(chalk.yellow(`[${utcNow()}] ⚠️ These tokens may cause issues with full sells (close instruction errors)`));
+      } else {
+        // 5-second countdown before selling
+        console.log(chalk.bgRed.white(`[${utcNow()}] 🧹 STARTUP CLEANUP - Will sell all ${existingTokens.length} token(s) in 5 seconds...`));
+        console.log(chalk.bgRed.white(`[${utcNow()}] ⚠️ Press Ctrl+C to abort if you want to keep these tokens`));
+
+        // Blocking countdown
+        for (let i = 5; i > 0; i--) {
+          process.stdout.write(chalk.red(`\r[${utcNow()}] ⏳ Selling in ${i} seconds...`));
+          const start = Date.now();
+          while (Date.now() - start < 1000) {
+            // Busy wait to block event loop
+          }
+        }
+        console.log(chalk.yellow(`\n[${utcNow()}] 🚀 Starting cleanup...`));
+
+        // Sell each token
+        let soldCount = 0;
+        let failedCount = 0;
+        for (const token of existingTokens) {
+          // Determine pool_status for proper sell routing
+          const cachedType = getTokenTypeSync(token.mint);
+          const isPumpToken = cachedType === 'pumpfun' || token.mint.toLowerCase().endsWith('pump');
+          const poolStatus = isPumpToken ? 'pumpfun' : 'other';
+
+          console.log(chalk.cyan(`[${utcNow()}] 💱 [${soldCount + failedCount + 1}/${existingTokens.length}] Selling ${token.uiBalance.toLocaleString()} of ${token.mint.slice(0, 8)}... (${poolStatus})`));
+          try {
+            const txid = await token_sell(token.mint, token.balance, poolStatus, true, null);
+            if (txid && txid !== "stop") {
+              console.log(chalk.green(`[${utcNow()}] ✅ Sold ${token.mint.slice(0, 8)}...: https://solscan.io/tx/${txid}`));
+              soldCount++;
+            } else {
+              console.log(chalk.yellow(`[${utcNow()}] ⚠️ Could not sell ${token.mint.slice(0, 8)}... (no liquidity or error)`));
+              failedCount++;
+            }
+            // Small delay between sells to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } catch (sellError) {
+            console.log(chalk.red(`[${utcNow()}] ❌ Failed to sell ${token.mint.slice(0, 8)}...: ${sellError.message}`));
+            failedCount++;
+          }
+        }
+        console.log(chalk.green(`[${utcNow()}] ✅ Startup cleanup completed: ${soldCount} sold, ${failedCount} failed`));
+
+        // ============================================================================
+        // POST-CLEANUP: Close remaining zero-balance ATAs
+        // ============================================================================
+        // Why this step is needed:
+        //   Regular SPL tokens: Already closed during sell (atomic transaction)
+        //   Token2022 tokens: Skipped during sell to prevent transaction failures
+        //
+        // This cleanup handles:
+        //   1. Token2022 ATAs that truly have 0 balance (no dust)
+        //   2. Token2022 ATAs where fee authority harvested withheld fees
+        //   3. Any ATAs that failed to close during sell for other reasons
+        //
+        // Important: We update cache onChain status to prevent buy errors
+        //   - Success → onChain: false (ATA closed, next buy will create it)
+        //   - Failure → onChain: true (ATA has dust, next buy skips creation)
+        // ============================================================================
+        console.log(chalk.cyan(`[${utcNow()}] 🔍 Checking for remaining zero-balance ATAs...`));
+        try {
+          const zeroBalanceATAs = await getZeroBalanceTokenAccounts();
+          if (zeroBalanceATAs.length > 0) {
+            console.log(chalk.yellow(`[${utcNow()}] 🧹 Found ${zeroBalanceATAs.length} zero-balance ATA(s) to close...`));
+            const wallet = await loadwallet();
+            const connection = rpc_connection();
+            let closedCount = 0;
+            let closeFailedCount = 0;
+
+            for (const ata of zeroBalanceATAs) {
+              try {
+                const latestBlockHash = await connection.getLatestBlockhash();
+                const instructions = [
+                  ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
+                  ComputeBudgetProgram.setComputeUnitLimit({ units: 10000 }),
+                  createCloseAccountInstruction(
+                    ata.pubkey,
+                    wallet.keypair.publicKey,
+                    wallet.keypair.publicKey,
+                    [],
+                    ata.programId
+                  )
+                ];
+
+                const message = new TransactionMessage({
+                  payerKey: wallet.keypair.publicKey,
+                  recentBlockhash: latestBlockHash.blockhash,
+                  instructions: instructions,
+                }).compileToV0Message();
+
+                const transaction = new VersionedTransaction(message);
+                transaction.sign([wallet.keypair]);
+
+                const txid = await connection.sendTransaction(transaction, {
+                  skipPreflight: false,
+                  maxRetries: 2,
+                });
+
+                if (txid) {
+                  // SUCCESS: ATA closed, rent recovered
+                  // Update cache: onChain=false so next buy creates new ATA
+                  updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), false);
+                  console.log(chalk.green(`[${utcNow()}] ✅ Closed ATA for ${ata.mint.slice(0, 8)}...: https://solscan.io/tx/${txid}`));
+                  closedCount++;
+                } else {
+                  // FAILED: No txid returned
+                  // Update cache: onChain=true to prevent "account already exists" error on next buy
+                  updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), true);
+                  closeFailedCount++;
+                }
+              } catch (closeErr) {
+                // FAILED: Close instruction failed (Token2022 likely has withheld dust from transfer fees)
+                // Update cache: onChain=true to prevent "account already exists" error on next buy
+                updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), true);
+                console.log(chalk.yellow(`[${utcNow()}] ⚠️ Failed to close ATA for ${ata.mint.slice(0, 8)}...: ${closeErr.message}`));
+                closeFailedCount++;
+              }
+            }
+            console.log(chalk.green(`[${utcNow()}] ✅ ATA cleanup completed: ${closedCount} closed, ${closeFailedCount} failed`));
+          } else {
+            console.log(chalk.green(`[${utcNow()}] ✅ No zero-balance ATAs to close`));
+          }
+        } catch (ataCleanupError) {
+          console.log(chalk.yellow(`[${utcNow()}] ⚠️ ATA cleanup check failed: ${ataCleanupError.message}`));
+        }
+      }
+    }
+  } catch (cleanupError) {
+    console.log(chalk.red(`[${utcNow()}] ❌ Portfolio check failed: ${cleanupError.message}`));
+    console.log(chalk.yellow(`[${utcNow()}] ⚠️ Continuing with bot startup despite error...`));
+  }
 
   // Initial balance check before starting
   console.log(chalk.blue(`[${utcNow()}] 🔍 Performing initial balance check...`));
