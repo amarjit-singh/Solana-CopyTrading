@@ -211,8 +211,8 @@ export function parseTransactionData(buffer) {
         pool_status: "pumpswap",
         context: parsedData_PumpSwap,
       };
-    } else if (buffer.length == 266 || buffer.length == 273 || buffer.length == 274) {
-      // Support pump.fun formats: 266 (original), 273, 274 (new variants)
+    } else if (buffer.length == 266 || buffer.length == 273 || buffer.length == 274 || buffer.length == 275) {
+      // Support pump.fun formats: 266 (original), 273, 274, 275 (new variants)
       const parsedData_PumpFun = {
         mint: parsePublicKey(16), // 32 bytes (Mint address)
         solAmount: parseBigInt(48), // 8 bytes (Amount in SOL)
