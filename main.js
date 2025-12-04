@@ -84,7 +84,7 @@ const INSUFFICIENT_FUNDS_ALERT_COOLDOWN = parseInt(process.env.INSUFFICIENT_FUND
 const ENABLE_COPY_SELL = process.env.ENABLE_COPY_SELL !== "false"; // Default to true
 const COPY_SELL_COOLDOWN = parseInt(process.env.COPY_SELL_COOLDOWN) || 30000; // 30 seconds default cooldown between copy sells
 const COPY_SELL_PERCENTAGE = parseFloat(process.env.COPY_SELL_PERCENTAGE) || 100; // Default to 100% (sell all)
-const COPY_SELL_MODE = process.env.COPY_SELL_MODE || "percentage"; // "percentage" or "full"
+const COPY_SELL_MODE = process.env.COPY_SELL_MODE || "mimic"; // "mimic" (proportional) or "full" (FIFO 100% of oldest buy)
 const SKIP_STARTUP_CLEANUP = process.env.SKIP_STARTUP_CLEANUP === "true"; // Set to true to keep existing tokens on startup
 
 // In-memory bought tokens cache for copy trading (ULTRA FAST)
@@ -896,8 +896,11 @@ class TransactionMonitor extends EventEmitter {
             }
             // Still need to decrement the purchase count for proportional sells
             updateTokenPurchaseCount(tokenMint, -1);
+          } else if (sellData.isFull) {
+            // FULL MODE: Remove by purchase object (target's sell amount may differ from buy amount)
+            removePurchase(tokenMint, user, sellData.purchase);
           } else {
-            // For exact matches, remove the specific purchase (this already decrements the count)
+            // MIMIC MODE: For exact matches, remove by target sell amount (original behavior)
             removePurchase(tokenMint, user, targetSellAmount);
           }
           
@@ -1595,7 +1598,12 @@ export async function pump_geyser() {
   console.log(chalk.bgCyan.black(`[${utcNow()}] 📊 COPY TRADING LOGIC`));
   console.log(chalk.cyan(`[${utcNow()}] 📡 Bot monitors COPY_WALLET transactions via gRPC`));
   console.log(chalk.cyan(`[${utcNow()}] 🟢 Copy wallet BUYS → Your wallet copies the buy`));
-  console.log(chalk.cyan(`[${utcNow()}] 🔴 Copy wallet SELLS → Your wallet copies the sell`));
+  console.log(chalk.cyan(`[${utcNow()}] 🔴 Copy wallet SELLS → Your wallet copies the sell (Mode: ${COPY_SELL_MODE.toUpperCase()})`));
+  if (COPY_SELL_MODE === "mimic") {
+    console.log(chalk.cyan(`[${utcNow()}]    ↳ MIMIC: Sells in same proportions as target wallet`));
+  } else if (COPY_SELL_MODE === "full") {
+    console.log(chalk.cyan(`[${utcNow()}]    ↳ FULL: Always sells 100% of oldest buy order (FIFO)`));
+  }
   console.log(chalk.cyan(`[${utcNow()}] 🏠 Your wallet transactions → Portfolio tracking only (no copy loop)`));
 
   // Function to start all monitors
@@ -2097,41 +2105,67 @@ function getPosition(tokenMint, targetWallet) {
 }
 
 // New function to get exact sell amount based on target wallet's sell amount
+// IMPORTANT: This function has TWO completely separate code paths:
+//   - FULL mode (lines below): NEW behavior for FIFO selling
+//   - MIMIC mode (lines after): ORIGINAL behavior 100% UNCHANGED
 function getExactSellAmount(tokenMint, targetWallet, targetSellAmount) {
   const position = getPosition(tokenMint, targetWallet);
   if (!position || !position.purchases || position.purchases.length === 0) {
     return null;
   }
-  
+
+  // ============================================================================
+  // MODE 1: FULL - Always sell 100% of oldest buy order (FIFO) - NEW BEHAVIOR
+  // ============================================================================
+  if (COPY_SELL_MODE === "full") {
+    const oldestPurchase = position.purchases[0]; // First element is oldest (FIFO)
+    console.log(chalk.yellow(`📋 FULL MODE: Selling 100% of oldest buy order`));
+    console.log(chalk.yellow(`   Target originally bought: ${oldestPurchase.targetBoughtAmount.toLocaleString()} tokens`));
+    console.log(chalk.yellow(`   We originally bought: ${oldestPurchase.ourBoughtAmount.toLocaleString()} tokens`));
+    console.log(chalk.yellow(`   Target is now selling: ${targetSellAmount.toLocaleString()} tokens`));
+    console.log(chalk.yellow(`   We will sell: ${oldestPurchase.ourBoughtAmount.toLocaleString()} tokens (100% of our oldest buy)`));
+    console.log(chalk.yellow(`   Remaining purchases after this sell: ${position.purchases.length - 1}`));
+    return {
+      ourSellAmount: oldestPurchase.ourBoughtAmount, // Sell 100% of oldest buy
+      purchase: oldestPurchase,
+      isFull: true // Flag to indicate full sell of this purchase
+    };
+  }
+
+  // ============================================================================
+  // MODE 2: MIMIC - Sell in same proportions as target - ORIGINAL BEHAVIOR (UNCHANGED)
+  // ============================================================================
   // Find matching purchase based on target sell amount
   // Look for exact match first
   let matchingPurchase = position.purchases.find(p => p.targetBoughtAmount === targetSellAmount);
-  
+
   if (matchingPurchase) {
     // Exact match found, return our corresponding amount
+    console.log(chalk.yellow(`📋 MIMIC MODE: Exact match found (${matchingPurchase.ourBoughtAmount} tokens)`));
     return {
       ourSellAmount: matchingPurchase.ourBoughtAmount,
       purchase: matchingPurchase
     };
   }
-  
+
   // If no exact match, find the closest match (for partial sells)
   // Sort purchases by target amount to find the best match
   const sortedPurchases = [...position.purchases].sort((a, b) => Math.abs(a.targetBoughtAmount - targetSellAmount) - Math.abs(b.targetBoughtAmount - targetSellAmount));
-  
+
   if (sortedPurchases.length > 0) {
     const closestPurchase = sortedPurchases[0];
     // Calculate proportional amount based on the closest match
     const ratio = targetSellAmount / closestPurchase.targetBoughtAmount;
     const ourSellAmount = Math.floor(closestPurchase.ourBoughtAmount * ratio);
-    
+
+    console.log(chalk.yellow(`📋 MIMIC MODE: Proportional sell (${ourSellAmount} tokens, ${(ratio * 100).toFixed(2)}% of purchase)`));
     return {
       ourSellAmount: ourSellAmount,
       purchase: closestPurchase,
       isProportional: true
     };
   }
-  
+
   return null;
 }
 
@@ -2152,23 +2186,43 @@ function removePosition(tokenMint, targetWallet) {
 }
 
 // New function to remove specific purchase after selling
-function removePurchase(tokenMint, targetWallet, targetSellAmount) {
+// IMPORTANT: This function handles BOTH mimic and full modes differently:
+//   - MIMIC mode (exact match): passes targetSellAmount (number) - ORIGINAL behavior preserved
+//   - FULL mode: passes purchase object - NEW behavior for FIFO selling
+function removePurchase(tokenMint, targetWallet, targetSellAmountOrPurchase) {
   const position = getPosition(tokenMint, targetWallet);
   if (!position || !position.purchases) return false;
-  
-  // Find and remove the matching purchase
-  const purchaseIndex = position.purchases.findIndex(p => p.targetBoughtAmount === targetSellAmount);
-  
+
+  let purchaseIndex = -1;
+
+  // Check if we received a purchase object (FULL mode) or just the target sell amount (MIMIC mode)
+  if (typeof targetSellAmountOrPurchase === 'object' && targetSellAmountOrPurchase !== null) {
+    // FULL MODE: Purchase object passed - find by reference or by matching amounts
+    // This handles cases where target's sell amount differs from original buy amount
+    purchaseIndex = position.purchases.findIndex(p => p === targetSellAmountOrPurchase);
+    if (purchaseIndex === -1) {
+      // Fallback: try to match by both target and our amounts
+      purchaseIndex = position.purchases.findIndex(
+        p => p.targetBoughtAmount === targetSellAmountOrPurchase.targetBoughtAmount &&
+             p.ourBoughtAmount === targetSellAmountOrPurchase.ourBoughtAmount
+      );
+    }
+  } else {
+    // MIMIC MODE: Number passed - find by target sell amount (ORIGINAL behavior)
+    const targetSellAmount = targetSellAmountOrPurchase;
+    purchaseIndex = position.purchases.findIndex(p => p.targetBoughtAmount === targetSellAmount);
+  }
+
   if (purchaseIndex !== -1) {
     const removedPurchase = position.purchases.splice(purchaseIndex, 1)[0];
     position.totalAmount -= removedPurchase.ourBoughtAmount;
     position.lastUpdate = Date.now();
-    
+
     // Decrement remaining purchase count
     updateTokenPurchaseCount(tokenMint, -1); // Subtract 1 purchase
-    
-    console.log(chalk.yellow(`[${utcNow()}] 🗑️ Purchase removed: ${tokenMint.slice(0, 8)}... | Wallet: ${targetWallet.slice(0, 8)}... | Target: ${targetSellAmount.toLocaleString()} | Our: ${removedPurchase.ourBoughtAmount.toLocaleString()}`));
-    
+
+    console.log(chalk.yellow(`[${utcNow()}] 🗑️ Purchase removed: ${tokenMint.slice(0, 8)}... | Wallet: ${targetWallet.slice(0, 8)}... | Target: ${removedPurchase.targetBoughtAmount.toLocaleString()} | Our: ${removedPurchase.ourBoughtAmount.toLocaleString()}`));
+
     // If no more purchases, remove the entire position
     if (position.purchases.length === 0) {
       removePosition(tokenMint, targetWallet);
