@@ -878,9 +878,13 @@ class TransactionMonitor extends EventEmitter {
         const sellType = isFullSell ? "FULL" : "PARTIAL";
         const matchType = sellData.isProportional ? "PROPORTIONAL" : "EXACT";
         console.log(`[${utcNow()}] 🎯 Copy ${sellType} ${matchType} selling ${copySellAmount.toLocaleString()} tokens for ${shortTokenName} (following ${user.slice(0, 8)}... target: ${targetSellAmount.toLocaleString()})`);
-        
+
+        // Get current position to pass tracked balance for verification
+        const position = getPosition(tokenMint, user);
+        const trackedBalance = position ? position.totalAmount : null;
+
         // Execute sell using position data with full/partial flag
-        const txid = await token_sell(tokenMint, copySellAmount, pool_status, isFullSell, context);
+        const txid = await token_sell(tokenMint, copySellAmount, pool_status, isFullSell, context, trackedBalance);
         
         if (txid) {
           console.log(chalk.bgGreen.white(`[${utcNow()}] ✅  ${sellType} ${matchType} SELL EXECUTED: ${copySellAmount.toLocaleString()} tokens sold (following ${user.slice(0, 8)}... target: ${targetSellAmount.toLocaleString()})`));
@@ -1681,7 +1685,8 @@ export async function pump_geyser() {
 
           console.log(chalk.cyan(`[${utcNow()}] 💱 [${soldCount + failedCount + 1}/${existingTokens.length}] Selling ${token.uiBalance.toLocaleString()} of ${token.mint.slice(0, 8)}... (${poolStatus})`));
           try {
-            const txid = await token_sell(token.mint, token.balance, poolStatus, true, null);
+            // Pass token.balance as both the sell amount AND tracked balance for verification
+            const txid = await token_sell(token.mint, token.balance, poolStatus, true, null, token.balance);
             if (txid && txid !== "stop") {
               console.log(chalk.green(`[${utcNow()}] ✅ Sold ${token.mint.slice(0, 8)}...: https://solscan.io/tx/${txid}`));
               soldCount++;

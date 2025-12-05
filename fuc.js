@@ -66,22 +66,25 @@ export const token_buy = async (mint, sol_amount, pool_status,  context) => {
   return {txid, token_amount};
 };
 
-export const token_sell = async (mint, tokenAmount, pool_status, isFull, context) => {
+export const token_sell = async (mint, tokenAmount, pool_status, isFull, context, trackedBalance = null) => {
   try {
-   
+
     if (!mint) {
       throw new Error("mint is required and was not provided.");
     }
     console.log(chalk.red(`🔴SELL tokenAmount:::${tokenAmount} pool_status: ${pool_status} `));
+    if (trackedBalance !== null) {
+      console.log(chalk.red(`🔴SELL tracked balance: ${trackedBalance}`));
+    }
 
     const currentUTC = new Date();
     let txid = "";
     if (pool_status == "pumpfun") {
       txid = await sell_pumpfun(mint, tokenAmount, isFull, context);
-    } 
-   
+    }
+
     else {
-      txid = await swap("SELL", mint, tokenAmount);
+      txid = await swap("SELL", mint, tokenAmount, trackedBalance);
     }
 
     // const txid = await swap("SELL", mint, tokenAmount);
@@ -98,7 +101,7 @@ export const token_sell = async (mint, tokenAmount, pool_status, isFull, context
       console.log(chalk.green(`Successfully sold ${tokenAmount} tokens : https://solscan.io/tx/${txid}`));
       return txid;
     }else{
-      txid = await swap("SELL", mint, tokenAmount);
+      txid = await swap("SELL", mint, tokenAmount, trackedBalance);
       const endUTC = new Date();
     const timeTaken = endUTC.getTime() - currentUTC.getTime();
     console.log(`⏱️ Total SELL time taken using swap: ${timeTaken}ms (${(timeTaken / 1000).toFixed(2)}s)`);
@@ -108,7 +111,7 @@ export const token_sell = async (mint, tokenAmount, pool_status, isFull, context
 
     return null;
   } catch (error) {
-    txid = await swap("SELL", mint, tokenAmount);
+    txid = await swap("SELL", mint, tokenAmount, trackedBalance);
     console.error("Error in token_sell:", error.message);
     const endUTC = new Date();
     const timeTaken = endUTC.getTime() - currentUTC.getTime();

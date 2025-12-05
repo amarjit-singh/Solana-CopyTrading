@@ -190,7 +190,7 @@ export const getBalance = async () => {
   return balance / LAMPORTS_PER_SOL;
 };
 
-export const swap = async (action, mint, amount) => {
+export const swap = async (action, mint, amount, trackedBalance = null) => {
   const SOL_ADDRESS = "So11111111111111111111111111111111111111112";
   const RETRY_DELAY = Number(process.env.RETRY_DELAY) || 1000; // fallback to 1s if not set
 
@@ -213,27 +213,15 @@ export const swap = async (action, mint, amount) => {
     }
 
     console.log(`Swapping ${amount} of ${tokenA} for ${tokenB}...`);
+    if (action === "SELL" && trackedBalance !== null) {
+      console.log(`Tracked balance: ${trackedBalance} tokens, Selling: ${amount} tokens`);
+    }
     let retryCount = 0;
+    const isSellAction = tokenA !== SOL_ADDRESS && tokenB === SOL_ADDRESS;
+
     while (retryCount <= MAX_RETRIES) {
       try {
         console.log(`Attempt ${retryCount + 1}/${MAX_RETRIES + 1}`);
-        // If this is a sell (tokenA is not SOL and tokenB is SOL), and retryCount > 1, check tokenA balance before proceeding
-        if (
-          retryCount > 1 &&
-          tokenA !== SOL_ADDRESS &&
-          tokenB === SOL_ADDRESS
-        ) {
-          const balance = await getSplTokenBalance(tokenA);
-          console.log(`(Retry #${retryCount}) Current tokenA (${tokenA}) balance:`, balance, "Requested amount:", amount);
-          if (balance <= 0) {
-            console.log(`No balance for tokenA (${tokenA}) to sell. Aborting swap.`);
-            return "stop";
-          }
-          if (amount > balance) {
-            console.log(`Requested amount (${amount}) exceeds available balance (${balance}) for tokenA (${tokenA}). Adjusting amount to available balance.`);
-            amount = balance;
-          }
-        }
 
         const startTime = Date.now();
         const quoteData = await getResponse(tokenA, tokenB, amount, process.env.SLIPPAGE_BPS || "50", wallet);
@@ -253,6 +241,56 @@ export const swap = async (action, mint, amount) => {
 
         if (!txid) {
           throw new Error("Transaction was not confirmed");
+        }
+
+        // For SELL transactions, verify that the balance actually decreased
+        if (isSellAction && trackedBalance !== null) {
+          console.log("Verifying token balance after sell...");
+
+          // Wait a moment for the blockchain to update
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          const balanceAfterSell = await getSplTokenBalance(tokenA);
+          const expectedBalance = trackedBalance - amount;
+
+          console.log(`Expected balance after sell: ${expectedBalance}, Actual: ${balanceAfterSell}`);
+
+          // If account doesn't exist anymore (null), check if we sold everything
+          if (balanceAfterSell === null) {
+            // Allow small tolerance for dust when account is closed (50 tokens or less expected remaining)
+            if (expectedBalance <= 0 || expectedBalance <= 50) {
+              console.log(chalk.green(`✅ SELL VERIFIED: Token account closed - all tokens sold as expected`));
+              logToFile(`✅ Sell verified: ${tokenA} account closed after selling ${amount} (tracked: ${trackedBalance}, expected remaining: ${expectedBalance}), txid: ${txid}`);
+            } else {
+              console.error(chalk.red(`❌ SELL VERIFICATION FAILED: Account closed but should have ${expectedBalance} tokens remaining!`));
+              throw new Error(`Account closed unexpectedly - expected ${expectedBalance} tokens remaining`);
+            }
+          }
+          // Account exists, verify the balance matches expected
+          else {
+            // Calculate acceptable tolerance for rounding/fractional errors
+            // Use 0.01% (very small) or 50 tokens, whichever is larger
+            // This catches real failures while allowing minor rounding differences
+            const tolerance = Math.max(Math.abs(expectedBalance) * 0.0001, 50);
+            const difference = Math.abs(balanceAfterSell - expectedBalance);
+
+            if (difference <= tolerance) {
+              console.log(chalk.green(`✅ SELL VERIFIED: Balance matches expected (${balanceAfterSell} ≈ ${expectedBalance}, diff: ${difference})`));
+              logToFile(`✅ Sell verified: ${tokenA} balance now ${balanceAfterSell} (expected ${expectedBalance}, sold ${amount}, diff: ${difference}), txid: ${txid}`);
+            } else if (balanceAfterSell >= trackedBalance) {
+              // No change in balance - transaction failed
+              console.error(chalk.red(`❌ SELL VERIFICATION FAILED: Balance did not decrease!`));
+              console.error(chalk.red(`Before: ${trackedBalance}, After: ${balanceAfterSell}, Sold: ${amount}`));
+              console.error(chalk.red(`Transaction may have failed on-chain despite getting txid: ${txid}`));
+              throw new Error("Sell transaction failed - balance unchanged");
+            } else {
+              // Balance decreased but not by the expected amount
+              console.error(chalk.red(`❌ SELL VERIFICATION FAILED: Balance mismatch!`));
+              console.error(chalk.red(`Expected: ${expectedBalance}, Actual: ${balanceAfterSell}, Difference: ${difference}, Tolerance: ${tolerance}`));
+              console.error(chalk.red(`Tracked: ${trackedBalance}, Sold: ${amount}`));
+              throw new Error(`Sell amount mismatch - expected ${expectedBalance} but got ${balanceAfterSell} (diff: ${difference})`);
+            }
+          }
         }
 
         console.log(`--------------------------------------------------------\n
