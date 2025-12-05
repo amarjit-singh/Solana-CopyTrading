@@ -348,7 +348,10 @@ function startConnectionChecker() {
 startConnectionChecker();
 
 // Cleanup on process exit
+// Note: These handlers clean up resources but do NOT call process.exit()
+// The main.js graceful shutdown handler will handle the exit after selling all tokens
 process.on("SIGINT", () => {
+  console.log("[swapsdk_0slot] Cleaning up managers on SIGINT...");
   blockhashManager.stop();
   slotKeepAliveManager.stop();
   nozomiKeepAliveManager.stop();
@@ -356,10 +359,11 @@ process.on("SIGINT", () => {
   if (connectionCheckInterval) {
     clearInterval(connectionCheckInterval);
   }
-  process.exit(0);
+  // Don't call process.exit() - let main.js handle it after selling tokens
 });
 
 process.on("SIGTERM", () => {
+  console.log("[swapsdk_0slot] Cleaning up managers on SIGTERM...");
   blockhashManager.stop();
   slotKeepAliveManager.stop();
   nozomiKeepAliveManager.stop();
@@ -367,7 +371,7 @@ process.on("SIGTERM", () => {
   if (connectionCheckInterval) {
     clearInterval(connectionCheckInterval);
   }
-  process.exit(0);
+  // Don't call process.exit() - let main.js handle it after selling tokens
 });
 
 // Helper to safely parse env vars to BigInt, with fallback/default

@@ -162,6 +162,126 @@ function utcNow() {
   return new Date().toISOString();
 }
 
+// ============================================================================
+// EMERGENCY CLEANUP - Sell all tokens before bot exit
+// ============================================================================
+async function sellAllTokensBeforeExit() {
+  console.log(chalk.bgRed.white(`[${utcNow()}] 🚨 EMERGENCY CLEANUP - Selling all tokens before exit...`));
+
+  try {
+    const existingTokens = await getAllTokenAccounts();
+
+    if (existingTokens.length === 0) {
+      console.log(chalk.yellow(`[${utcNow()}] ℹ️ No tokens to sell - wallet is empty`));
+      return;
+    }
+
+    console.log(chalk.yellow(`[${utcNow()}] 📦 Found ${existingTokens.length} token(s) to sell before exit`));
+
+    // Sell each token immediately (no countdown for emergency cleanup)
+    let soldCount = 0;
+    let failedCount = 0;
+
+    for (const token of existingTokens) {
+      // Determine pool_status for proper sell routing
+      const cachedType = getTokenTypeSync(token.mint);
+      const isPumpToken = cachedType === 'pumpfun' || token.mint.toLowerCase().endsWith('pump');
+      const poolStatus = isPumpToken ? 'pumpfun' : 'other';
+
+      console.log(chalk.cyan(`[${utcNow()}] 💱 [${soldCount + failedCount + 1}/${existingTokens.length}] Selling ${token.uiBalance.toLocaleString()} of ${token.mint.slice(0, 8)}... (${poolStatus})`));
+
+      try {
+        // Pass token.balance as both the sell amount AND tracked balance for verification
+        const txid = await token_sell(token.mint, token.balance, poolStatus, true, null, token.balance);
+        if (txid && txid !== "stop") {
+          console.log(chalk.green(`[${utcNow()}] ✅ Sold ${token.mint.slice(0, 8)}...: https://solscan.io/tx/${txid}`));
+          soldCount++;
+        } else {
+          console.log(chalk.yellow(`[${utcNow()}] ⚠️ Could not sell ${token.mint.slice(0, 8)}... (no liquidity or error)`));
+          failedCount++;
+        }
+        // Small delay between sells to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (sellError) {
+        console.log(chalk.red(`[${utcNow()}] ❌ Failed to sell ${token.mint.slice(0, 8)}...: ${sellError.message}`));
+        failedCount++;
+      }
+    }
+
+    console.log(chalk.green(`[${utcNow()}] ✅ Emergency cleanup completed: ${soldCount} sold, ${failedCount} failed`));
+
+    // ============================================================================
+    // POST-CLEANUP: Close remaining zero-balance ATAs
+    // ============================================================================
+    console.log(chalk.cyan(`[${utcNow()}] 🔍 Checking for remaining zero-balance ATAs...`));
+    try {
+      const zeroBalanceATAs = await getZeroBalanceTokenAccounts();
+      if (zeroBalanceATAs.length > 0) {
+        console.log(chalk.yellow(`[${utcNow()}] 🧹 Found ${zeroBalanceATAs.length} zero-balance ATA(s) to close...`));
+        const wallet = await loadwallet();
+        const connection = rpc_connection();
+        let closedCount = 0;
+        let closeFailedCount = 0;
+
+        for (const ata of zeroBalanceATAs) {
+          try {
+            const latestBlockHash = await connection.getLatestBlockhash();
+            const instructions = [
+              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 10000 }),
+              createCloseAccountInstruction(
+                ata.pubkey,
+                wallet.keypair.publicKey,
+                wallet.keypair.publicKey,
+                [],
+                ata.programId
+              )
+            ];
+
+            const message = new TransactionMessage({
+              payerKey: wallet.keypair.publicKey,
+              recentBlockhash: latestBlockHash.blockhash,
+              instructions: instructions,
+            }).compileToV0Message();
+
+            const transaction = new VersionedTransaction(message);
+            transaction.sign([wallet.keypair]);
+
+            const txid = await connection.sendTransaction(transaction, {
+              skipPreflight: false,
+              maxRetries: 2,
+            });
+
+            if (txid) {
+              // SUCCESS: ATA closed, rent recovered
+              updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), false);
+              console.log(chalk.green(`[${utcNow()}] ✅ Closed ATA for ${ata.mint.slice(0, 8)}...: https://solscan.io/tx/${txid}`));
+              closedCount++;
+            } else {
+              // FAILED: No txid returned
+              updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), true);
+              closeFailedCount++;
+            }
+          } catch (closeErr) {
+            // FAILED: Close instruction failed
+            updateOnChainStatus(ata.mint, wallet.keypair.publicKey.toString(), true);
+            console.log(chalk.yellow(`[${utcNow()}] ⚠️ Failed to close ATA for ${ata.mint.slice(0, 8)}...: ${closeErr.message}`));
+            closeFailedCount++;
+          }
+        }
+        console.log(chalk.green(`[${utcNow()}] ✅ ATA cleanup completed: ${closedCount} closed, ${closeFailedCount} failed`));
+      } else {
+        console.log(chalk.green(`[${utcNow()}] ✅ No zero-balance ATAs to close`));
+      }
+    } catch (ataCleanupError) {
+      console.log(chalk.yellow(`[${utcNow()}] ⚠️ ATA cleanup check failed: ${ataCleanupError.message}`));
+    }
+
+  } catch (cleanupError) {
+    console.log(chalk.red(`[${utcNow()}] ❌ Emergency cleanup failed: ${cleanupError.message}`));
+  }
+}
+
 // Token Portfolio Management Functions
 function createTokenPortfolio() {
   const portfolio = new Map(); // tokenMint -> portfolio data
@@ -1870,6 +1990,9 @@ export async function pump_geyser() {
         console.log(chalk.cyan(`[${utcNow()}] ⏳ Initial insufficient funds alert disabled via ENABLE_INSUFFICIENT_FUNDS_ALERTS=false`));
       }
 
+      // Sell all tokens before exiting
+      await sellAllTokensBeforeExit();
+
       process.exit(1); // Exit with error code
     }
 
@@ -1884,6 +2007,10 @@ export async function pump_geyser() {
   } catch (balanceError) {
     console.error(chalk.red(`[${utcNow()}] ❌ Failed to check initial balance: ${balanceError.message}`));
     console.error(chalk.red(`[${utcNow()}] ❌ Cannot start bot without balance verification`));
+
+    // Sell all tokens before exiting
+    await sellAllTokensBeforeExit();
+
     process.exit(1); // Exit with error code
   }
 
@@ -1935,6 +2062,45 @@ export async function pump_geyser() {
       monitor.logAllBotsDebugInfo();
     }
   });
+
+  // ============================================================================
+  // GRACEFUL SHUTDOWN - Handle Ctrl+C and process termination
+  // ============================================================================
+  let shutdownInProgress = false;
+
+  const gracefulShutdown = async (signal) => {
+    if (shutdownInProgress) {
+      console.log(chalk.yellow(`[${utcNow()}] ⏳ Shutdown already in progress...`));
+      return;
+    }
+
+    shutdownInProgress = true;
+    console.log(chalk.bgYellow.black(`\n[${utcNow()}] 🛑 Received ${signal} - Initiating graceful shutdown...`));
+
+    try {
+      // Stop all monitors first
+      console.log(chalk.cyan(`[${utcNow()}] 🛑 Stopping all monitors...`));
+      await stopAllMonitors();
+
+      // Clear the status interval
+      if (globalStatusInterval) {
+        clearInterval(globalStatusInterval);
+      }
+
+      // Sell all tokens before exiting
+      await sellAllTokensBeforeExit();
+
+      console.log(chalk.bgGreen.white(`[${utcNow()}] ✅ Graceful shutdown completed`));
+      process.exit(0);
+    } catch (error) {
+      console.error(chalk.red(`[${utcNow()}] ❌ Error during graceful shutdown: ${error.message}`));
+      process.exit(1);
+    }
+  };
+
+  // Register shutdown handlers
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
   
 
