@@ -2144,7 +2144,8 @@ function getExactSellAmount(tokenMint, targetWallet, targetSellAmount) {
     console.log(chalk.yellow(`📋 MIMIC MODE: Exact match found (${matchingPurchase.ourBoughtAmount} tokens)`));
     return {
       ourSellAmount: matchingPurchase.ourBoughtAmount,
-      purchase: matchingPurchase
+      purchase: matchingPurchase,
+      sellMode: 'mimic'
     };
   }
 
@@ -2155,14 +2156,23 @@ function getExactSellAmount(tokenMint, targetWallet, targetSellAmount) {
   if (sortedPurchases.length > 0) {
     const closestPurchase = sortedPurchases[0];
     // Calculate proportional amount based on the closest match
-    const ratio = targetSellAmount / closestPurchase.targetBoughtAmount;
+    let ratio = targetSellAmount / closestPurchase.targetBoughtAmount;
+
+    // Cap ratio at 100% to prevent over-selling
+    // This handles cases where target sells more than they bought (had pre-existing tokens)
+    if (ratio > 1.0) {
+      console.log(chalk.yellow(`📋 MIMIC MODE: Target selling ${(ratio * 100).toFixed(1)}% of tracked purchase. Capping at 100%.`));
+      ratio = 1.0;
+    }
+
     const ourSellAmount = Math.floor(closestPurchase.ourBoughtAmount * ratio);
 
     console.log(chalk.yellow(`📋 MIMIC MODE: Proportional sell (${ourSellAmount} tokens, ${(ratio * 100).toFixed(2)}% of purchase)`));
     return {
       ourSellAmount: ourSellAmount,
       purchase: closestPurchase,
-      isProportional: true
+      isProportional: true,
+      sellMode: 'mimic'
     };
   }
 
