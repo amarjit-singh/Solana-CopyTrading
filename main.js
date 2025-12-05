@@ -706,6 +706,12 @@ class TransactionMonitor extends EventEmitter {
       context,
     } = transactionData;
 
+    // Check if buying is disabled due to insufficient funds
+    if (this.buyingDisabled) {
+      console.log(chalk.yellow(`[${utcNow()}] ⏭️ Skipping buy for ${tokenMint} - buying disabled (insufficient funds)`));
+      return { success: false, skipped: true, reason: "buying_disabled", tokenMint };
+    }
+
     const now = Date.now();
        
     // // Check if we're already processing this token
@@ -889,7 +895,7 @@ class TransactionMonitor extends EventEmitter {
         if (txid) {
           console.log(chalk.bgGreen.white(`[${utcNow()}] ✅  ${sellType} ${matchType} SELL EXECUTED: ${copySellAmount.toLocaleString()} tokens sold (following ${user.slice(0, 8)}... target: ${targetSellAmount.toLocaleString()})`));
           console.log(chalk.bgGreen.white(`[${utcNow()}] ✅  sell txid: https://solscan.io/tx/${txid}`));
-          
+
           // Remove the specific purchase that was sold
           if (sellData.isProportional) {
             // For proportional sells, we can't remove a specific purchase, so we reduce the total
@@ -907,7 +913,21 @@ class TransactionMonitor extends EventEmitter {
             // MIMIC MODE: For exact matches, remove by target sell amount (original behavior)
             removePurchase(tokenMint, user, targetSellAmount);
           }
-          
+
+          // Check if buying was disabled and re-enable if we have sufficient funds now
+          if (this.buyingDisabled) {
+            try {
+              const balanceInfo = await checkWalletBalance();
+              if (balanceInfo.balance >= LIMIT_BALANCE) {
+                this.enableBuying(balanceInfo.balance);
+              } else {
+                console.log(chalk.yellow(`[${utcNow()}] ⚠️ Buying still disabled: Balance ${balanceInfo.balance.toFixed(4)} SOL (< ${LIMIT_BALANCE} SOL required)`));
+              }
+            } catch (balanceCheckError) {
+              console.error(chalk.red(`[${utcNow()}] ❌ Failed to check balance after sell: ${balanceCheckError.message}`));
+            }
+          }
+
           return { success: true, txid, amount: copySellAmount, sellType, matchType };
         }
       } catch (copySellError) {
@@ -1538,6 +1558,12 @@ class TransactionMonitor extends EventEmitter {
     console.log(chalk.cyan(`[${utcNow()}] 🔄 Bot will continue running for selling existing positions`));
   }
 
+  // Method to re-enable buying when funds are restored
+  enableBuying(currentBalance) {
+    this.buyingDisabled = false;
+    console.log(chalk.bgGreen.white(`[${utcNow()}] ✅ BUYING RE-ENABLED: Balance restored to ${currentBalance.toFixed(4)} SOL (>= ${LIMIT_BALANCE} SOL)`));
+  }
+
 
   handleError(error) {
     console.error(`[${utcNow()}] Stream Error1:`, error);
@@ -1844,7 +1870,7 @@ export async function pump_geyser() {
         console.log(chalk.cyan(`[${utcNow()}] ⏳ Initial insufficient funds alert disabled via ENABLE_INSUFFICIENT_FUNDS_ALERTS=false`));
       }
 
-      // process.exit(1); // Exit with error code
+      process.exit(1); // Exit with error code
     }
 
     // Show balance status
@@ -1858,7 +1884,7 @@ export async function pump_geyser() {
   } catch (balanceError) {
     console.error(chalk.red(`[${utcNow()}] ❌ Failed to check initial balance: ${balanceError.message}`));
     console.error(chalk.red(`[${utcNow()}] ❌ Cannot start bot without balance verification`));
-    // process.exit(1); // Exit with error code
+    process.exit(1); // Exit with error code
   }
 
   // Add event listeners for insufficient funds (now handled per monitor)
