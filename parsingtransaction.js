@@ -31,23 +31,68 @@ export async function parseTransactionFromData(parsedTx) {
 
   if (validInstructions.length === 0) return null;
 
-  const largestDataInstruction = await validInstructions.reduce((largest, current) => {
-    if (!current || !current.data || !largest || !largest.data) {
-      return largest || current;
-    }
-    return current.data.length > largest.data.length ? current : largest;
-  });
-  // console.log(largestDataInstruction)
+  // Try to extract account keys for program ID detection FIRST
+  const accountKeys = parsedTx?.transaction?.message?.accountKeys
+                   || parsedTx?.transaction?.message?.staticAccountKeys;
 
-  if (!largestDataInstruction || !largestDataInstruction.data) {
+  // Known platform program IDs to search for
+  const PLATFORM_PROGRAM_IDS = [
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  // Pump.fun
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  // Raydium AMM
+    'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',  // Raydium CPMM
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',  // Raydium CLMM
+  ];
+
+  // Token program IDs to IGNORE
+  const TOKEN_PROGRAM_IDS = [
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+    '11111111111111111111111111111111',
+    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  ];
+
+  // BETTER APPROACH: Find instruction by platform program ID first
+  let targetInstruction = null;
+  let detectedPlatform = null;
+
+  if (accountKeys) {
+    for (const instruction of validInstructions) {
+      if (instruction.programIdIndex !== undefined) {
+        const programId = accountKeys[instruction.programIdIndex];
+
+        // Check if this is a platform program (not a token program)
+        if (PLATFORM_PROGRAM_IDS.includes(programId)) {
+          targetInstruction = instruction;
+          detectedPlatform = programId;
+          break; // Found it, stop searching
+        }
+      }
+    }
+  }
+
+  // FALLBACK: If no platform program found, use largest data instruction
+  if (!targetInstruction) {
+    targetInstruction = validInstructions.reduce((largest, current) => {
+      if (!current || !current.data || !largest || !largest.data) {
+        return largest || current;
+      }
+      return current.data.length > largest.data.length ? current : largest;
+    });
+  }
+  // console.log(targetInstruction)
+
+  if (!targetInstruction || !targetInstruction.data) {
     return null;
   }
-  // console.log(largestDataInstruction.data)
-  const rawData = bs58.decode(largestDataInstruction.data);
+
+  const programIdIndex = targetInstruction.programIdIndex;
+
+  // console.log(targetInstruction.data)
+  const rawData = bs58.decode(targetInstruction.data);
   const buffer = Buffer.from(rawData);
   // console.log(buffer)
 
-  const parsedInstructionData = parseTransactionData(buffer);
+  const parsedInstructionData = parseTransactionData(buffer, accountKeys, programIdIndex);
   // console.log(parsedInstructionData)
 
   if (!parsedInstructionData) return null;
@@ -80,6 +125,14 @@ export async function tOutPut(data) {
   const signature = bs58.encode(Buffer.from(dataTx?.transaction.signatures?.[0]));
   // console.log("signature:::", signature);
 
+  // DEBUG: Log transaction structure to find accountKeys location
+  // console.log("🔍 Transaction structure:", JSON.stringify({
+  //   hasMessage: !!dataTx?.transaction?.message,
+  //   hasAccountKeys: !!dataTx?.transaction?.message?.accountKeys,
+  //   messageKeys: dataTx?.transaction?.message ? Object.keys(dataTx.transaction.message) : [],
+  //   transactionKeys: dataTx?.transaction ? Object.keys(dataTx.transaction) : []
+  // }, null, 2));
+
   const meta = dataTx?.meta;
   const logs = meta?.logMessages;
   const logFilter = logs?.some((instruction) => instruction.match(instruction.match(/MintTo/i)));
@@ -98,19 +151,73 @@ export async function tOutPut(data) {
 
   if (validInstructions.length === 0) return null;
 
-  const largestDataInstruction = await validInstructions.reduce((largest, current) => {
-    if (!current || !current.data || !largest || !largest.data) {
-      return largest || current;
-    }
-    return current.data.length > largest.data.length ? current : largest;
-  });
+  // Try to get account keys from transaction message FIRST
+  const accountKeys = dataTx?.transaction?.message?.accountKeys
+                   || dataTx?.transaction?.message?.staticAccountKeys
+                   || data?.transaction?.transaction?.transaction?.message?.accountKeys;
 
-  if (!largestDataInstruction || !largestDataInstruction.data) {
+  // Known platform program IDs to search for
+  const PLATFORM_PROGRAM_IDS = [
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  // Pump.fun
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',  // Raydium AMM
+    'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',  // Raydium CPMM
+    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',  // Raydium CLMM
+  ];
+
+  // Token program IDs to IGNORE
+  const TOKEN_PROGRAM_IDS = [
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+    '11111111111111111111111111111111',
+    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  ];
+
+  // BETTER APPROACH: Find instruction by platform program ID first
+  let targetInstruction = null;
+  let detectedPlatform = null;
+
+  if (accountKeys) {
+    console.log(`🔍 Searching through ${validInstructions.length} instructions for DEX program...`);
+
+    for (const instruction of validInstructions) {
+      if (instruction.programIdIndex !== undefined) {
+        const programId = accountKeys[instruction.programIdIndex];
+        console.log(`  📋 Instruction programId: ${programId}, data length: ${instruction.data.length}`);
+
+        // Check if this is a platform program (not a token program)
+        if (PLATFORM_PROGRAM_IDS.includes(programId)) {
+          targetInstruction = instruction;
+          detectedPlatform = programId;
+          console.log(`  ✅ Found DEX instruction! Platform: ${programId}`);
+          break; // Found it, stop searching
+        } else if (TOKEN_PROGRAM_IDS.includes(programId)) {
+          console.log(`  ⏭️  Skipping token program: ${programId}`);
+        } else {
+          console.log(`  ❓ Unknown program: ${programId}`);
+        }
+      }
+    }
+  }
+
+  // FALLBACK: If no platform program found, use largest data instruction
+  if (!targetInstruction) {
+    console.log("⚠️ No platform program found, falling back to largest data instruction");
+    targetInstruction = validInstructions.reduce((largest, current) => {
+      if (!current || !current.data || !largest || !largest.data) {
+        return largest || current;
+      }
+      return current.data.length > largest.data.length ? current : largest;
+    });
+  }
+
+  if (!targetInstruction || !targetInstruction.data) {
     return null;
   }
-  
-  // console.log("🎈🎈🎈largestDataInstruction:::", largestDataInstruction.data);
-  const parsedInstructionData = parseTransactionData(largestDataInstruction.data);
+
+  console.log(`🎯 Using instruction: programId=${detectedPlatform || 'unknown'}, data.length=${targetInstruction.data.length}`);
+
+  // console.log("🎈🎈🎈targetInstruction:::", targetInstruction.data);
+  const parsedInstructionData = parseTransactionData(targetInstruction.data, accountKeys, targetInstruction.programIdIndex);
   // console.log("🎈",JSON.stringify(parsedInstructionData,null,2))
 
   if (!parsedInstructionData) return null;
@@ -133,8 +240,38 @@ export async function tOutPut(data) {
   // console.log("Signature>>>>>>>>", signature);
 }
 
-export function parseTransactionData(buffer) {
+export function parseTransactionData(buffer, accountKeys = null, programIdIndex = null) {
   try {
+    // Known platform program IDs
+    const PLATFORM_PROGRAMS = {
+      PUMPFUN: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+      RAYDIUM_AMM: '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+      RAYDIUM_CPMM: 'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',
+      RAYDIUM_CLMM: 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK',
+    };
+
+    // Token program IDs to IGNORE
+    const TOKEN_PROGRAMS = {
+      TOKEN_PROGRAM: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      TOKEN_2022: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+      SYSTEM_PROGRAM: '11111111111111111111111111111111',
+      ASSOCIATED_TOKEN: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+    };
+
+    // Try to get program ID from accountKeys
+    let detectedProgramId = null;
+    if (accountKeys && programIdIndex !== null && programIdIndex !== undefined) {
+      detectedProgramId = accountKeys[programIdIndex];
+      console.log(`🔍 Program ID from instruction: ${detectedProgramId}`);
+
+      // CHECK: Make sure this is NOT a token program (we want the DEX program)
+      const isTokenProgram = Object.values(TOKEN_PROGRAMS).includes(detectedProgramId);
+      if (isTokenProgram) {
+        console.log(`⚠️ Skipping token program ID: ${detectedProgramId}`);
+        detectedProgramId = null; // Reset so we fall back to buffer length
+      }
+    }
+
     function parsePublicKey(offset) {
       return bs58.encode(buffer.slice(offset, offset + 32)); // Convert 32 bytes to Base58
     }
@@ -142,8 +279,31 @@ export function parseTransactionData(buffer) {
     function parseBigInt(offset) {
       return buffer.readBigUInt64LE(offset).toString(); // Read 8 bytes as Little-Endian
     }
-   
 
+    // ========================================================================
+    // PLATFORM DETECTION: Use Program ID (most reliable method)
+    // ========================================================================
+    if (detectedProgramId) {
+      if (detectedProgramId === PLATFORM_PROGRAMS.PUMPFUN) {
+        console.log(`✅ Detected PUMP.FUN by Program ID`);
+        // Continue to pump.fun parsing logic (will hit buffer.length check below)
+        // This confirms it's pump.fun before we parse the specific format
+      } else if (detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_AMM) {
+        console.log(`✅ Detected RAYDIUM AMM by Program ID`);
+        // Continue to Raydium parsing
+      } else if (detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_CPMM ||
+                 detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_CLMM) {
+        console.log(`✅ Detected RAYDIUM CPMM/CLMM by Program ID`);
+      } else {
+        console.log(`⚠️ Unknown DEX Program ID: ${detectedProgramId}`);
+      }
+    } else {
+      console.log(`⚠️ No Program ID available, falling back to buffer length detection`);
+    }
+
+    // ========================================================================
+    // FALLBACK: Buffer Length Detection (backwards compatibility)
+    // ========================================================================
     if (buffer.length == 368) {
       const parsedData_PumpSwap = {
         mint: null,
