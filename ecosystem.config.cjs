@@ -28,8 +28,8 @@ module.exports = {
     max_restarts: 10,
     restart_delay: 4000,
 
-    // Graceful shutdown
-    kill_timeout: 5000,
+    // Graceful shutdown - allow enough time to sell all tokens before exit
+    kill_timeout: 60000,
     wait_ready: false,
 
     // Load .env file
