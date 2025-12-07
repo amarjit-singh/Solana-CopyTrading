@@ -58,10 +58,12 @@ export async function parseTransactionFromData(parsedTx) {
   if (accountKeys) {
     for (const instruction of validInstructions) {
       if (instruction.programIdIndex !== undefined) {
-        const programId = accountKeys[instruction.programIdIndex];
+        const programIdRaw = accountKeys[instruction.programIdIndex];
+        // Convert to string (handles both PublicKey objects and strings)
+        const programId = typeof programIdRaw === 'string' ? programIdRaw : programIdRaw?.toString();
 
         // Check if this is a platform program (not a token program)
-        if (PLATFORM_PROGRAM_IDS.includes(programId)) {
+        if (programId && PLATFORM_PROGRAM_IDS.includes(programId)) {
           targetInstruction = instruction;
           detectedPlatform = programId;
           break; // Found it, stop searching
@@ -177,23 +179,18 @@ export async function tOutPut(data) {
   let detectedPlatform = null;
 
   if (accountKeys) {
-    console.log(`🔍 Searching through ${validInstructions.length} instructions for DEX program...`);
-
     for (const instruction of validInstructions) {
       if (instruction.programIdIndex !== undefined) {
-        const programId = accountKeys[instruction.programIdIndex];
-        console.log(`  📋 Instruction programId: ${programId}, data length: ${instruction.data.length}`);
+        const programIdRaw = accountKeys[instruction.programIdIndex];
+        // Convert to string (handles both PublicKey objects and strings)
+        const programId = typeof programIdRaw === 'string' ? programIdRaw : programIdRaw?.toString();
 
         // Check if this is a platform program (not a token program)
-        if (PLATFORM_PROGRAM_IDS.includes(programId)) {
+        if (programId && PLATFORM_PROGRAM_IDS.includes(programId)) {
           targetInstruction = instruction;
           detectedPlatform = programId;
-          console.log(`  ✅ Found DEX instruction! Platform: ${programId}`);
+          console.log(`✅ Platform Program ID: ${programId}`);
           break; // Found it, stop searching
-        } else if (TOKEN_PROGRAM_IDS.includes(programId)) {
-          console.log(`  ⏭️  Skipping token program: ${programId}`);
-        } else {
-          console.log(`  ❓ Unknown program: ${programId}`);
         }
       }
     }
@@ -214,9 +211,6 @@ export async function tOutPut(data) {
     return null;
   }
 
-  console.log(`🎯 Using instruction: programId=${detectedPlatform || 'unknown'}, data.length=${targetInstruction.data.length}`);
-
-  // console.log("🎈🎈🎈targetInstruction:::", targetInstruction.data);
   const parsedInstructionData = parseTransactionData(targetInstruction.data, accountKeys, targetInstruction.programIdIndex);
   // console.log("🎈",JSON.stringify(parsedInstructionData,null,2))
 
@@ -261,13 +255,13 @@ export function parseTransactionData(buffer, accountKeys = null, programIdIndex 
     // Try to get program ID from accountKeys
     let detectedProgramId = null;
     if (accountKeys && programIdIndex !== null && programIdIndex !== undefined) {
-      detectedProgramId = accountKeys[programIdIndex];
-      console.log(`🔍 Program ID from instruction: ${detectedProgramId}`);
+      const programIdRaw = accountKeys[programIdIndex];
+      // Convert to string (handles both PublicKey objects and strings)
+      detectedProgramId = typeof programIdRaw === 'string' ? programIdRaw : programIdRaw?.toString();
 
       // CHECK: Make sure this is NOT a token program (we want the DEX program)
       const isTokenProgram = Object.values(TOKEN_PROGRAMS).includes(detectedProgramId);
       if (isTokenProgram) {
-        console.log(`⚠️ Skipping token program ID: ${detectedProgramId}`);
         detectedProgramId = null; // Reset so we fall back to buffer length
       }
     }
@@ -283,23 +277,6 @@ export function parseTransactionData(buffer, accountKeys = null, programIdIndex 
     // ========================================================================
     // PLATFORM DETECTION: Use Program ID (most reliable method)
     // ========================================================================
-    if (detectedProgramId) {
-      if (detectedProgramId === PLATFORM_PROGRAMS.PUMPFUN) {
-        console.log(`✅ Detected PUMP.FUN by Program ID`);
-        // Continue to pump.fun parsing logic (will hit buffer.length check below)
-        // This confirms it's pump.fun before we parse the specific format
-      } else if (detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_AMM) {
-        console.log(`✅ Detected RAYDIUM AMM by Program ID`);
-        // Continue to Raydium parsing
-      } else if (detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_CPMM ||
-                 detectedProgramId === PLATFORM_PROGRAMS.RAYDIUM_CLMM) {
-        console.log(`✅ Detected RAYDIUM CPMM/CLMM by Program ID`);
-      } else {
-        console.log(`⚠️ Unknown DEX Program ID: ${detectedProgramId}`);
-      }
-    } else {
-      console.log(`⚠️ No Program ID available, falling back to buffer length detection`);
-    }
 
     // ========================================================================
     // FALLBACK: Buffer Length Detection (backwards compatibility)
@@ -399,9 +376,6 @@ export function parseTransactionData(buffer, accountKeys = null, programIdIndex 
       // console.log(parsedData_PumpFun);
 
       let isBuy = parsedData_PumpFun.isBuy;
-      
-      // Debug: Log pump.fun transaction detection
-      console.log(`🔍 PUMP.FUN DETECTED (buffer.length=${buffer.length}): isBuy=${isBuy}, user=${parsedData_PumpFun.user?.slice(0,8)}..., mint=${parsedData_PumpFun.mint?.slice(0,8)}...`);
 
       return {
         solchange: parsedData_PumpFun.solAmount,
